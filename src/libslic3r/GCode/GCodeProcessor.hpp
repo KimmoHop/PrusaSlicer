@@ -242,11 +242,9 @@ namespace Slic3r {
             float acceleration; // mm/s^2
             // hard limit for the acceleration, to which the firmware will clamp.
             float max_acceleration; // mm/s^2
-#if ENABLE_RETRACT_ACCELERATION
             float retract_acceleration; // mm/s^2
             // hard limit for the acceleration, to which the firmware will clamp.
             float max_retract_acceleration; // mm/s^2
-#endif // ENABLE_RETRACT_ACCELERATION
             float travel_acceleration; // mm/s^2
             // hard limit for the travel acceleration, to which the firmware will clamp.
             float max_travel_acceleration; // mm/s^2
@@ -359,9 +357,7 @@ namespace Slic3r {
             std::vector<float> filament_diameters;
             std::vector<float> filament_densities;
             PrintEstimatedStatistics print_statistics;
-#if ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
             std::vector<CustomGCode::Item> custom_gcode_per_print_z;
-#endif // ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
 
 #if ENABLE_GCODE_VIEWER_STATISTICS
             int64_t time{ 0 };
@@ -389,6 +385,45 @@ namespace Slic3r {
             bool is_active() const { return m_active; }
             bool has_first_vertex() const { return m_first_vertex.has_value(); }
         };
+
+#if ENABLE_FIX_PREVIEW_OPTIONS_Z
+        // Helper class used to fix the z for color change, pause print and
+        // custom gcode markes
+        class OptionsZCorrector
+        {
+            Result& m_result;
+            std::optional<size_t> m_move_id;
+            std::optional<size_t> m_custom_gcode_per_print_z_id;
+
+        public:
+            explicit OptionsZCorrector(Result& result) : m_result(result) {
+            }
+
+            void set() {
+                m_move_id = m_result.moves.size() - 1;
+                m_custom_gcode_per_print_z_id = m_result.custom_gcode_per_print_z.size() - 1;
+            }
+
+            void update(float height) {
+                if (!m_move_id.has_value() || !m_custom_gcode_per_print_z_id.has_value())
+                    return;
+
+                const Vec3f position = m_result.moves.back().position;
+
+                MoveVertex& move = m_result.moves.emplace_back(m_result.moves[*m_move_id]);
+                move.position = position;
+                move.height = height;
+                m_result.moves.erase(m_result.moves.begin() + *m_move_id);
+                m_result.custom_gcode_per_print_z[*m_custom_gcode_per_print_z_id].print_z = position.z();
+                reset();
+            }
+
+            void reset() {
+                m_move_id.reset();
+                m_custom_gcode_per_print_z_id.reset();
+            }
+        };
+#endif // ENABLE_FIX_PREVIEW_OPTIONS_Z
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         struct DataChecker
@@ -494,9 +529,13 @@ namespace Slic3r {
         CpColor m_cp_color;
         bool m_use_volumetric_e;
         SeamsDetector m_seams_detector;
-#if ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
+#if ENABLE_FIX_PREVIEW_OPTIONS_Z
+        OptionsZCorrector m_options_z_corrector;
+#endif // ENABLE_FIX_PREVIEW_OPTIONS_Z
         size_t m_last_default_color_id;
-#endif // ENABLE_FIX_IMPORTING_COLOR_PRINT_VIEW_INTO_GCODEVIEWER
+#if ENABLE_GCODE_VIEWER_STATISTICS
+        std::chrono::time_point<std::chrono::high_resolution_clock> m_start_time;
+#endif // ENABLE_GCODE_VIEWER_STATISTICS
 
         enum class EProducer
         {
@@ -679,9 +718,7 @@ namespace Slic3r {
         float get_axis_max_acceleration(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         float get_axis_max_jerk(PrintEstimatedStatistics::ETimeMode mode, Axis axis) const;
         float get_retract_acceleration(PrintEstimatedStatistics::ETimeMode mode) const;
-#if ENABLE_RETRACT_ACCELERATION
         void  set_retract_acceleration(PrintEstimatedStatistics::ETimeMode mode, float value);
-#endif // ENABLE_RETRACT_ACCELERATION
         float get_acceleration(PrintEstimatedStatistics::ETimeMode mode) const;
         void  set_acceleration(PrintEstimatedStatistics::ETimeMode mode, float value);
         float get_travel_acceleration(PrintEstimatedStatistics::ETimeMode mode) const;

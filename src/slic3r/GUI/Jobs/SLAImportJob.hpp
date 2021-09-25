@@ -7,9 +7,9 @@ namespace Slic3r { namespace GUI {
 
 class SLAImportJob : public PlaterJob {
     class priv;
-    
+
     std::unique_ptr<priv> p;
-    
+
 protected:
     void prepare() override;
     void process() override;

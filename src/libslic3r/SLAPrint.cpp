@@ -693,7 +693,7 @@ void SLAPrint::process()
     if (m_objects.empty())
         return;
 
-    name_tbb_thread_pool_threads();
+    name_tbb_thread_pool_threads_set_locale();
 
     // Assumption: at this point the print objects should be populated only with
     // the model objects we have to process and the instances are also filtered
@@ -896,7 +896,6 @@ SLAPrintObject::SLAPrintObject(SLAPrint *print, ModelObject *model_object)
         obj = m_model_object->raw_mesh();
         if (!obj.empty()) {
             obj.transform(m_trafo);
-            obj.require_shared_vertices();
         }
     })
 {}

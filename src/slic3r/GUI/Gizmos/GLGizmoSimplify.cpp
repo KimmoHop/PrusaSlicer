@@ -313,9 +313,8 @@ void GLGizmoSimplify::process()
 }
 
 void GLGizmoSimplify::set_its(indexed_triangle_set &its) {
-    auto tm = std::make_unique<TriangleMesh>(its);
-    tm->repair();
-    m_volume->set_mesh(std::move(tm));
+    m_volume->set_mesh(its);
+    m_volume->calculate_convex_hull();
     m_volume->set_new_unique_id();
     m_volume->get_object()->invalidate_bounding_box();
     m_need_reload = true;
@@ -337,7 +336,7 @@ void GLGizmoSimplify::on_set_state()
             auto notification_manager = wxGetApp().plater()->get_notification_manager();
             notification_manager->push_notification(
                 NotificationType::CustomNotification,
-                NotificationManager::NotificationLevel::RegularNotification,
+                NotificationManager::NotificationLevel::RegularNotificationLevel,
                 _u8L("ERROR: Wait until Simplification ends or Cancel process."));
             return;
         }

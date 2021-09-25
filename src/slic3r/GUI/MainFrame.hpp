@@ -190,7 +190,7 @@ public:
     bool can_save() const;
     bool can_save_as() const;
     void save_project();
-    void save_project_as(const wxString& filename = wxString());
+    bool save_project_as(const wxString& filename = wxString());
 
     void        add_to_recent_projects(const wxString& filename);
     void        technology_changed();
@@ -204,7 +204,7 @@ public:
     wxWindow*             m_plater_page{ nullptr };
     wxProgressDialog*     m_progress_dialog { nullptr };
     PrintHostQueueDialog* m_printhost_queue_dlg;
-    std::shared_ptr<ProgressStatusBar>  m_statusbar;
+//    std::shared_ptr<ProgressStatusBar>  m_statusbar;
 
 #ifdef __APPLE__
     std::unique_ptr<wxTaskBarIcon> m_taskbar_icon;

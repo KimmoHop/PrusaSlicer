@@ -140,7 +140,7 @@ public:
 
     bool is_project_dirty() const;
     void update_project_dirty_from_presets();
-    int  save_project_if_dirty();
+    int  save_project_if_dirty(const wxString& reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();
 #if ENABLE_PROJECT_DIRTY_STATE_DEBUG_WINDOW
@@ -235,7 +235,6 @@ public:
     void schedule_background_process(bool schedule = true);
     bool is_background_process_update_scheduled() const;
     void suppress_background_process(const bool stop_background_process) ;
-    void fix_through_netfabb(const int obj_idx, const int vol_idx = -1);
     void send_gcode();
 	void eject_drive();
 
@@ -359,11 +358,13 @@ public:
 	void set_bed_shape() const;
     void set_bed_shape(const Pointfs& shape, const std::string& custom_texture, const std::string& custom_model, bool force_as_custom = false) const;
 
-	const NotificationManager* get_notification_manager() const;
-	NotificationManager* get_notification_manager();
+    NotificationManager * get_notification_manager();
+    const NotificationManager * get_notification_manager() const;
+
+    void init_notification_manager();
 
     void bring_instance_forward();
-
+    
     // ROII wrapper for suppressing the Undo / Redo snapshot to be taken.
 	class SuppressSnapshots
 	{
