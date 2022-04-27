@@ -10,6 +10,7 @@
 #include "BitmapComboBox.hpp"
 #include "GalleryDialog.hpp"
 #include "MainFrame.hpp"
+#include "slic3r/Utils/UndoRedo.hpp"
 
 #include "OptionsGroup.hpp"
 #include "Tab.hpp"
@@ -238,6 +239,8 @@ ObjectList::ObjectList(wxWindow* parent) :
 
 ObjectList::~ObjectList()
 {
+    if (m_objects_model)
+        m_objects_model->DecRef();
 }
 
 void ObjectList::set_min_height()
@@ -348,7 +351,8 @@ void ObjectList::get_selection_indexes(std::vector<int>& obj_idxs, std::vector<i
 {
     wxDataViewItemArray sels;
     GetSelections(sels);
-    assert(!sels.IsEmpty());
+    if (sels.IsEmpty())
+        return;
 
     if ( m_objects_model->GetItemType(sels[0]) & itVolume || 
         (sels.Count()==1 && m_objects_model->GetItemType(m_objects_model->GetParent(sels[0])) & itVolume) ) {
@@ -374,64 +378,86 @@ void ObjectList::get_selection_indexes(std::vector<int>& obj_idxs, std::vector<i
     obj_idxs.erase(std::unique(obj_idxs.begin(), obj_idxs.end()), obj_idxs.end());
 }
 
-int ObjectList::get_mesh_errors_count(const int obj_idx, const int vol_idx /*= -1*/) const
+int ObjectList::get_repaired_errors_count(const int obj_idx, const int vol_idx /*= -1*/) const
 {
-    if (obj_idx < 0)
-        return 0;
-
-    return (*m_objects)[obj_idx]->get_mesh_errors_count(vol_idx);
+    return obj_idx >= 0 ? (*m_objects)[obj_idx]->get_repaired_errors_count(vol_idx) : 0;
 }
 
 static std::string get_warning_icon_name(const TriangleMeshStats& stats)
 {
-    return stats.repaired() ? (stats.manifold() ? "exclamation_manifold" : "exclamation") : "";
+    return stats.manifold() ? (stats.repaired() ? "exclamation_manifold" : "") : "exclamation";
 }
 
-std::pair<wxString, std::string> ObjectList::get_mesh_errors(const int obj_idx, const int vol_idx /*= -1*/, bool from_plater /*= false*/) const
+MeshErrorsInfo ObjectList::get_mesh_errors_info(const int obj_idx, const int vol_idx /*= -1*/, wxString* sidebar_info /*= nullptr*/) const
 {    
-    const int errors = get_mesh_errors_count(obj_idx, vol_idx);
-
-    if (errors == 0)
-        return { "", "" }; // hide tooltip
-
-    // Create tooltip string, if there are errors 
-    wxString tooltip = format_wxstr(_L_PLURAL("Auto-repaired %1$d error", "Auto-repaired %1$d errors", errors), errors) + ":\n";
+    if (obj_idx < 0)
+        return { {}, {} }; // hide tooltip
 
     const TriangleMeshStats& stats = vol_idx == -1 ?
         (*m_objects)[obj_idx]->get_object_stl_stats() :
         (*m_objects)[obj_idx]->volumes[vol_idx]->mesh().stats();
 
-    if (stats.degenerate_facets > 0)
-        tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d degenerate facet", "%1$d degenerate facets", stats.degenerate_facets), stats.degenerate_facets) + "\n";
-    if (stats.edges_fixed > 0)
-        tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d edge fixed", "%1$d edges fixed", stats.edges_fixed), stats.edges_fixed) + "\n";
-    if (stats.facets_removed > 0)
-        tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d facet removed", "%1$d facets removed", stats.facets_removed), stats.facets_removed) + "\n";
-    if (stats.facets_reversed > 0)
-        tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d facet reversed", "%1$d facets reversed", stats.facets_reversed), stats.facets_reversed) + "\n";
-    if (stats.backwards_edges > 0)
-        tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d backwards edge", "%1$d backwards edges", stats.backwards_edges), stats.backwards_edges) + "\n";
+    if (!stats.repaired() && stats.manifold()) {
+        if (sidebar_info)
+            *sidebar_info = _L("No errors detected");
+        return { {}, {} }; // hide tooltip
+    }
 
+    wxString tooltip, auto_repaired_info, remaining_info;
+
+    // Create tooltip string, if there are errors 
+    if (stats.repaired()) {
+        const int errors = get_repaired_errors_count(obj_idx, vol_idx);
+        auto_repaired_info = format_wxstr(_L_PLURAL("Auto-repaired %1$d error", "Auto-repaired %1$d errors", errors), errors);
+        tooltip += auto_repaired_info +":\n";
+
+        const RepairedMeshErrors& repaired = stats.repaired_errors;
+
+        if (repaired.degenerate_facets > 0)
+            tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d degenerate facet", "%1$d degenerate facets", repaired.degenerate_facets), repaired.degenerate_facets) + "\n";
+        if (repaired.edges_fixed > 0)
+            tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d edge fixed", "%1$d edges fixed", repaired.edges_fixed), repaired.edges_fixed) + "\n";
+        if (repaired.facets_removed > 0)
+            tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d facet removed", "%1$d facets removed", repaired.facets_removed), repaired.facets_removed) + "\n";
+        if (repaired.facets_reversed > 0)
+            tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d facet reversed", "%1$d facets reversed", repaired.facets_reversed), repaired.facets_reversed) + "\n";
+        if (repaired.backwards_edges > 0)
+            tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d backward edge", "%1$d backward edges", repaired.backwards_edges), repaired.backwards_edges) + "\n";
+    }
     if (!stats.manifold()) {
-        tooltip += _L("Remaning errors") + ":\n";
+        remaining_info = format_wxstr(_L_PLURAL("%1$d open edge", "%1$d open edges", stats.open_edges), stats.open_edges);
+
+        tooltip += _L("Remaining errors") + ":\n";
         tooltip += "\t" + format_wxstr(_L_PLURAL("%1$d open edge", "%1$d open edges", stats.open_edges), stats.open_edges) + "\n";
     }
 
-    if (is_windows10() && !from_plater)
+    if (sidebar_info)
+        *sidebar_info = stats.manifold() ? auto_repaired_info : (remaining_info + (stats.repaired() ? ("\n" + auto_repaired_info) : ""));
+
+    if (is_windows10() && !sidebar_info)
         tooltip += "\n" + _L("Right button click the icon to fix STL through Netfabb");
 
     return { tooltip, get_warning_icon_name(stats) };
 }
 
-std::pair<wxString, std::string> ObjectList::get_mesh_errors(bool from_plater /*= false*/)
+MeshErrorsInfo ObjectList::get_mesh_errors_info(wxString* sidebar_info /*= nullptr*/)
 {
-    if (!GetSelection())
+    wxDataViewItem item = GetSelection();
+    if (!item)
         return { "", "" };
 
     int obj_idx, vol_idx;
     get_selected_item_indexes(obj_idx, vol_idx);
 
-    return get_mesh_errors(obj_idx, vol_idx, from_plater);
+    if (obj_idx < 0) { // child of ObjectItem is selected
+        if (sidebar_info)
+            obj_idx = m_objects_model->GetObjectIdByItem(item);
+        else
+            return { "", "" };
+    }
+    assert(obj_idx >= 0);
+
+    return get_mesh_errors_info(obj_idx, vol_idx, sidebar_info);
 }
 
 void ObjectList::set_tooltip_for_item(const wxPoint& pt)
@@ -467,9 +493,12 @@ void ObjectList::set_tooltip_for_item(const wxPoint& pt)
 #endif //__WXMSW__
     else if (col->GetTitle() == _("Name") && (pt.x >= 2 * wxGetApp().em_unit() && pt.x <= 4 * wxGetApp().em_unit()))
     {
-        int obj_idx, vol_idx;
-        get_selected_item_indexes(obj_idx, vol_idx, item);
-        tooltip = get_mesh_errors(obj_idx, vol_idx).first;
+        if (const ItemType type = m_objects_model->GetItemType(item); 
+            type & (itObject | itVolume)) {
+            int obj_idx = m_objects_model->GetObjectIdByItem(item);
+            int vol_idx = type & itVolume ? m_objects_model->GetVolumeIdByItem(item) : -1;
+            tooltip = get_mesh_errors_info(obj_idx, vol_idx).tooltip;
+        }
     }
     
     GetMainWindow()->SetToolTip(tooltip);
@@ -792,7 +821,7 @@ void ObjectList::paste_objects_into_list(const std::vector<size_t>& object_idxs)
     wxDataViewItemArray items;
     for (const size_t object : object_idxs)
     {
-        add_object_to_list(object);
+        add_object_to_list(object, false);
         items.Add(m_objects_model->GetItemById(object));
     }
 
@@ -885,21 +914,14 @@ void ObjectList::list_manipulation(const wxPoint& mouse_pos, bool evt_context_me
 	        toggle_printable_state();
 	    else if (title == _("Editing"))
 	        show_context_menu(evt_context_menu);
-	    else if (title == _("Name"))
-	    {
-	        if (wxOSX)
-	            show_context_menu(evt_context_menu); // return context menu under OSX (related to #2909)
-
-	        if (is_windows10())
-	        {
-	            int obj_idx, vol_idx;
-	            get_selected_item_indexes(obj_idx, vol_idx, item);
-
-	            if (get_mesh_errors_count(obj_idx, vol_idx) > 0 && 
-	                mouse_pos.x > 2 * wxGetApp().em_unit() && mouse_pos.x < 4 * wxGetApp().em_unit())
-	                fix_through_netfabb();
-	        }
-	    }
+        else if (title == _("Name"))
+        {
+            if (is_windows10() && m_objects_model->HasWarningIcon(item) &&
+                mouse_pos.x > 2 * wxGetApp().em_unit() && mouse_pos.x < 4 * wxGetApp().em_unit())
+                fix_through_netfabb();
+            else if (evt_context_menu)
+                show_context_menu(evt_context_menu); // show context menu for "Name" column too
+        }
 	    // workaround for extruder editing under OSX 
 	    else if (wxOSX && evt_context_menu && title == _("Extruder"))
 	        extruder_editing();
@@ -1378,16 +1400,30 @@ void ObjectList::load_subobject(ModelVolumeType type, bool from_galery/* = false
     if (m_objects_model->GetItemType(item)&itInstance)
         item = m_objects_model->GetItemById(obj_idx);
 
-    std::vector<ModelVolume*> volumes;
-    if (type == ModelVolumeType::MODEL_PART)
-        load_part(*(*m_objects)[obj_idx], volumes, type, from_galery);
+    wxArrayString input_files;
+    if (from_galery) {
+        GalleryDialog dlg(this);
+        if (dlg.ShowModal() != wxID_CLOSE)
+            dlg.get_input_files(input_files);
+    }
     else
-        load_modifier(*(*m_objects)[obj_idx], volumes, type, from_galery);
+        wxGetApp().import_model(wxGetApp().tab_panel()->GetPage(0), input_files);
 
-    if (volumes.empty())
+    if (input_files.IsEmpty())
         return;
 
     take_snapshot((type == ModelVolumeType::MODEL_PART) ? _L("Load Part") : _L("Load Modifier"));
+
+    std::vector<ModelVolume*> volumes;
+    // ! ysFIXME - delete commented code after testing and rename "load_modifier" to something common
+    /*
+    if (type == ModelVolumeType::MODEL_PART)
+        load_part(*(*m_objects)[obj_idx], volumes, type, from_galery);
+    else*/
+        load_modifier(input_files, *(*m_objects)[obj_idx], volumes, type, from_galery);
+
+    if (volumes.empty())
+        return;
 
     wxDataViewItemArray items = reorder_volumes_and_get_selection(obj_idx, [volumes](const ModelVolume* volume) {
         return std::find(volumes.begin(), volumes.end(), volume) != volumes.end(); });
@@ -1404,8 +1440,8 @@ void ObjectList::load_subobject(ModelVolumeType type, bool from_galery/* = false
 
     selection_changed();
 }
-
-void ObjectList::load_part(ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery/* = false*/)
+/*
+void ObjectList::load_part(ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery = false)
 {
     if (type != ModelVolumeType::MODEL_PART)
         return;
@@ -1425,7 +1461,7 @@ void ObjectList::load_part(ModelObject& model_object, std::vector<ModelVolume*>&
     else
         wxGetApp().import_model(parent, input_files);
 
-    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().plater(), wxPD_AUTO_HIDE);
+    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().mainframe wxPD_AUTO_HIDE);
     wxBusyCursor busy;
 
     for (size_t i = 0; i < input_files.size(); ++i) {
@@ -1463,28 +1499,16 @@ void ObjectList::load_part(ModelObject& model_object, std::vector<ModelVolume*>&
         }
     }
 }
-
-void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery)
+*/
+void ObjectList::load_modifier(const wxArrayString& input_files, ModelObject& model_object, std::vector<ModelVolume*>& added_volumes, ModelVolumeType type, bool from_galery)
 {
-    if (type == ModelVolumeType::MODEL_PART)
-        return;
+    // ! ysFIXME - delete commented code after testing and rename "load_modifier" to something common
+    //if (type == ModelVolumeType::MODEL_PART)
+    //    return;
 
     wxWindow* parent = wxGetApp().tab_panel()->GetPage(0);
 
-    wxArrayString input_files;
-
-    if (from_galery) {
-        GalleryDialog dlg(this);
-        if (dlg.ShowModal() == wxID_CLOSE)
-            return;
-        dlg.get_input_files(input_files);
-        if (input_files.IsEmpty())
-            return;
-    }
-    else
-        wxGetApp().import_model(parent, input_files);
-
-    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().plater(), wxPD_AUTO_HIDE);
+    wxProgressDialog dlg(_L("Loading") + dots, "", 100, wxGetApp().mainframe, wxPD_AUTO_HIDE);
     wxBusyCursor busy;
 
     const int obj_idx = get_selected_obj_idx();
@@ -1534,7 +1558,7 @@ void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolum
             for (auto object : model.objects) {
                 if (model_object.origin_translation != Vec3d::Zero()) {
                     object->center_around_origin();
-                    Vec3d delta = model_object.origin_translation - object->origin_translation;
+                    const Vec3d delta = model_object.origin_translation - object->origin_translation;
                     for (auto volume : object->volumes) {
                         volume->translate(delta);
                     }
@@ -1548,6 +1572,12 @@ void ObjectList::load_modifier(ModelObject& model_object, std::vector<ModelVolum
         new_volume->name = boost::filesystem::path(input_file).filename().string();
         // set a default extruder value, since user can't add it manually
         new_volume->config.set_key_value("extruder", new ConfigOptionInt(0));
+        // update source data
+        new_volume->source.input_file = input_file;
+        new_volume->source.object_idx = obj_idx;
+        new_volume->source.volume_idx = int(model_object.volumes.size()) - 1;
+        if (model.objects.size() == 1 && model.objects.front()->volumes.size() == 1)
+            new_volume->source.mesh_offset = model.objects.front()->volumes.front()->source.mesh_offset;
 
         if (from_galery) {
             // Transform the new modifier to be aligned with the print bed.
@@ -1661,16 +1691,16 @@ void ObjectList::load_shape_object(const std::string& type_name)
     if (selection.get_object_idx() != -1)
         return;
 
-    const int obj_idx = m_objects->size();
-    if (obj_idx < 0)
-        return;
-
     take_snapshot(_L("Add Shape"));
 
     // Create mesh
     BoundingBoxf3 bb;
     TriangleMesh mesh = create_mesh(type_name, bb);
     load_mesh_object(mesh, _L("Shape") + "-" + _(type_name));
+#if ENABLE_RELOAD_FROM_DISK_REWORK
+    if (!m_objects->empty())
+        m_objects->back()->volumes.front()->source.is_from_builtin_objects = true;
+#endif // ENABLE_RELOAD_FROM_DISK_REWORK
     wxGetApp().mainframe->update_title();
 }
 
@@ -1729,12 +1759,9 @@ void ObjectList::load_mesh_object(const TriangleMesh &mesh, const wxString &name
     new_object->invalidate_bounding_box();
     new_object->translate(-bb.center());
 
-    if (center) {
-        const BoundingBoxf bed_shape = wxGetApp().plater()->bed_shape_bb();
-        new_object->instances[0]->set_offset(Slic3r::to_3d(bed_shape.center().cast<double>(), -new_object->origin_translation.z()));
-    } else {
-        new_object->instances[0]->set_offset(bb.center());
-    }
+    new_object->instances[0]->set_offset(center ? 
+        to_3d(wxGetApp().plater()->build_volume().bounding_volume2d().center(), -new_object->origin_translation.z()) :
+        bb.center());
 
     new_object->ensure_on_bed();
 
@@ -1786,10 +1813,8 @@ void ObjectList::del_subobject_item(wxDataViewItem& item)
 
     // If last volume item with warning was deleted, unmark object item
     if (type & itVolume) {
-        if (auto obj = object(obj_idx); obj->get_mesh_errors_count() == 0)
-            m_objects_model->DeleteWarningIcon(parent);
-        else
-            m_objects_model->AddWarningIcon(parent, get_warning_icon_name(obj->mesh().stats()));
+        const std::string& icon_name = get_warning_icon_name(object(obj_idx)->get_object_stl_stats());
+        m_objects_model->UpdateWarningIcon(parent, icon_name);
     }
 
     m_objects_model->Delete(item);
@@ -1908,9 +1933,15 @@ void ObjectList::del_layers_from_object(const int obj_idx)
 bool ObjectList::del_subobject_from_object(const int obj_idx, const int idx, const int type)
 {
     assert(idx >= 0);
-	if (obj_idx == 1000 || idx<0)
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+    if (m_objects->empty() || int(m_objects->size()) <= obj_idx)
+        // Cannot delete a wipe tower
+        return false;
+#else
+    if (obj_idx == 1000 || idx<0)
 		// Cannot delete a wipe tower or volume with negative id
 		return false;
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
 
     ModelObject* object = (*m_objects)[obj_idx];
 
@@ -2017,8 +2048,7 @@ void ObjectList::split()
 void ObjectList::merge(bool to_multipart_object)
 {
     // merge selected objects to the multipart object
-    if (to_multipart_object)
-    {
+    if (to_multipart_object) {
         auto get_object_idxs = [this](std::vector<int>& obj_idxs, wxDataViewItemArray& sels)
         {
             // check selections and split instances to the separated objects...
@@ -2029,8 +2059,7 @@ void ObjectList::merge(bool to_multipart_object)
                     break;
                 }
 
-            if (!instance_selection)
-            {
+            if (!instance_selection) {
                 for (wxDataViewItem item : sels) {
                     assert(m_objects_model->GetItemType(item) & itObject);
                     obj_idxs.emplace_back(m_objects_model->GetIdByItem(item));
@@ -2042,8 +2071,7 @@ void ObjectList::merge(bool to_multipart_object)
             std::map<int, std::set<int>> sel_map;
             std::set<int> empty_set;
             for (wxDataViewItem item : sels) {
-                if (m_objects_model->GetItemType(item) & itObject)
-                {
+                if (m_objects_model->GetItemType(item) & itObject) {
                     int obj_idx = m_objects_model->GetIdByItem(item);
                     int inst_cnt = (*m_objects)[obj_idx]->instances.size();
                     if (inst_cnt == 1)
@@ -2060,8 +2088,7 @@ void ObjectList::merge(bool to_multipart_object)
             // all objects, created from the instances will be added to the end of list
             int new_objects_cnt = 0; // count of this new objects
 
-            for (auto map_item : sel_map)
-            {
+            for (auto map_item : sel_map) {
                 int obj_idx = map_item.first;
                 // object with just 1 instance
                 if (map_item.second.empty()) {
@@ -2121,37 +2148,36 @@ void ObjectList::merge(bool to_multipart_object)
         new_object->name = _u8L("Merged");
         ModelConfig &config = new_object->config;
 
-        for (int obj_idx : obj_idxs)
-        {
+        for (int obj_idx : obj_idxs) {
             ModelObject* object = (*m_objects)[obj_idx];
 
             const Geometry::Transformation& transformation = object->instances[0]->get_transformation();
-            Vec3d scale     = transformation.get_scaling_factor();
-            Vec3d mirror    = transformation.get_mirror();
-            Vec3d rotation  = transformation.get_rotation();
+            const Vec3d scale     = transformation.get_scaling_factor();
+            const Vec3d mirror    = transformation.get_mirror();
+            const Vec3d rotation  = transformation.get_rotation();
 
             if (object->id() == (*m_objects)[obj_idxs.front()]->id())
                 new_object->add_instance();
-            Transform3d     volume_offset_correction = new_object->instances[0]->get_transformation().get_matrix().inverse() * transformation.get_matrix();
+            const Transform3d& volume_offset_correction = transformation.get_matrix();
 
             // merge volumes
             for (const ModelVolume* volume : object->volumes) {
                 ModelVolume* new_volume = new_object->add_volume(*volume);
 
                 //set rotation
-                Vec3d vol_rot = new_volume->get_rotation() + rotation;
+                const Vec3d vol_rot = new_volume->get_rotation() + rotation;
                 new_volume->set_rotation(vol_rot);
 
                 // set scale
-                Vec3d vol_sc_fact = new_volume->get_scaling_factor().cwiseProduct(scale);
+                const Vec3d vol_sc_fact = new_volume->get_scaling_factor().cwiseProduct(scale);
                 new_volume->set_scaling_factor(vol_sc_fact);
 
                 // set mirror
-                Vec3d vol_mirror = new_volume->get_mirror().cwiseProduct(mirror);
+                const Vec3d vol_mirror = new_volume->get_mirror().cwiseProduct(mirror);
                 new_volume->set_mirror(vol_mirror);
 
                 // set offset
-                Vec3d vol_offset = volume_offset_correction* new_volume->get_offset();
+                const Vec3d vol_offset = volume_offset_correction* new_volume->get_offset();
                 new_volume->set_offset(vol_offset);
             }
             new_object->sort_volumes(wxGetApp().app_config->get("order_volumes") == "1");
@@ -2184,6 +2210,11 @@ void ObjectList::merge(bool to_multipart_object)
             for (const auto& range : object->layer_config_ranges)
                 new_object->layer_config_ranges.emplace(range);
         }
+
+        new_object->center_around_origin();
+        new_object->translate_instances(-new_object->origin_translation);
+        new_object->origin_translation = Vec3d::Zero();
+
         // remove selected objects
         remove();
 
@@ -2194,8 +2225,7 @@ void ObjectList::merge(bool to_multipart_object)
     }
     // merge all parts to the one single object
     // all part's settings will be lost
-    else
-    {
+    else {
         wxDataViewItem item = GetSelection();
         if (!item)
             return;
@@ -2498,7 +2528,7 @@ void ObjectList::part_selection_changed()
         if (item) {
             // wxGetApp().obj_manipul()->get_og()->set_value("object_name", m_objects_model->GetName(item));
             wxGetApp().obj_manipul()->update_item_name(m_objects_model->GetName(item));
-            wxGetApp().obj_manipul()->update_warning_icon_state(get_mesh_errors(obj_idx, volume_id));
+            wxGetApp().obj_manipul()->update_warning_icon_state(get_mesh_errors_info(obj_idx, volume_id));
         }
     }
 
@@ -2758,10 +2788,7 @@ void ObjectList::delete_from_model_and_list(const std::vector<ItemForDelete>& it
                         m_objects_model->SetExtruder(extruder, parent);
                     }
                     // If last volume item with warning was deleted, unmark object item
-                    if (obj->get_mesh_errors_count() == 0)
-                        m_objects_model->DeleteWarningIcon(parent);
-                    else
-                        m_objects_model->AddWarningIcon(parent, get_warning_icon_name(obj->mesh().stats()));
+                    m_objects_model->UpdateWarningIcon(parent, get_warning_icon_name(obj->get_object_stl_stats()));
                 }
                 wxGetApp().plater()->canvas3D()->ensure_on_bed(item->obj_idx, printer_technology() != ptSLA);
             }
@@ -3469,7 +3496,7 @@ void ObjectList::update_selections_on_canvas()
         volume_idxs = selection.get_missing_volume_idxs_from(volume_idxs);
         if (volume_idxs.size() > 0)
         {
-            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Remove from list")));
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Remove from list")), UndoRedo::SnapshotType::Selection);
             selection.remove_volumes(mode, volume_idxs);
         }
     }
@@ -3481,7 +3508,7 @@ void ObjectList::update_selections_on_canvas()
         // OR there is no single selection
         if (selection.get_mode() == mode || !single_selection) 
             volume_idxs = selection.get_unselected_volume_idxs_from(volume_idxs);
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Add from list")));
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Add from list")), UndoRedo::SnapshotType::Selection);
         selection.add_volumes(mode, volume_idxs, single_selection);
     }
 
@@ -3759,7 +3786,7 @@ void ObjectList::change_part_type()
     }
 
     const wxString names[] = { _L("Part"), _L("Negative Volume"), _L("Modifier"), _L("Support Blocker"), _L("Support Enforcer") };
-    auto new_type = ModelVolumeType(wxGetSingleChoiceIndex(_L("Type:"), _L("Select type of part"), wxArrayString(5, names), int(type)));
+    auto new_type = ModelVolumeType(wxGetApp().GetSingleChoiceIndex(_L("Type:"), _L("Select type of part"), wxArrayString(5, names), int(type)));
 
 	if (new_type == type || new_type == ModelVolumeType::INVALID)
         return;
@@ -4003,18 +4030,8 @@ void ObjectList::rename_item()
     if (new_name.IsEmpty())
         return;
 
-    bool is_unusable_symbol = false;
-    std::string chosen_name = Slic3r::normalize_utf8_nfc(new_name.ToUTF8());
-    const char* unusable_symbols = "<>:/\\|?*\"";
-    for (size_t i = 0; i < std::strlen(unusable_symbols); i++) {
-        if (chosen_name.find_first_of(unusable_symbols[i]) != std::string::npos) {
-            is_unusable_symbol = true;
-        }
-    }
-
-    if (is_unusable_symbol) {
-        show_error(this, _(L("The supplied name is not valid;")) + "\n" +
-            _(L("the following characters are not allowed:")) + " <>:/\\|?*\"");
+    if (Plater::has_illegal_filename_characters(new_name)) {
+        Plater::show_illegal_characters_warning(this);
         return;
     }
 
@@ -4042,17 +4059,21 @@ void ObjectList::fix_through_netfabb()
     // clear selections from the non-broken models if any exists
     // and than fill names of models to repairing 
     if (vol_idxs.empty()) {
+#if !FIX_THROUGH_NETFABB_ALWAYS
         for (int i = int(obj_idxs.size())-1; i >= 0; --i)
-                if (object(obj_idxs[i])->get_mesh_errors_count() == 0)
+                if (object(obj_idxs[i])->get_repaired_errors_count() == 0)
                     obj_idxs.erase(obj_idxs.begin()+i);
+#endif // FIX_THROUGH_NETFABB_ALWAYS
         for (int obj_idx : obj_idxs)
             model_names.push_back(object(obj_idx)->name);
     }
     else {
         ModelObject* obj = object(obj_idxs.front());
+#if !FIX_THROUGH_NETFABB_ALWAYS
         for (int i = int(vol_idxs.size()) - 1; i >= 0; --i)
-            if (obj->get_mesh_errors_count(vol_idxs[i]) == 0)
+            if (obj->get_repaired_errors_count(vol_idxs[i]) == 0)
                 vol_idxs.erase(vol_idxs.begin() + i);
+#endif // FIX_THROUGH_NETFABB_ALWAYS
         for (int vol_idx : vol_idxs)
             model_names.push_back(obj->volumes[vol_idx]->name);
     }
@@ -4098,15 +4119,16 @@ void ObjectList::fix_through_netfabb()
     Plater::TakeSnapshot snapshot(plater, _L("Fix through NetFabb"));
 
     // Open a progress dialog.
-    wxProgressDialog progress_dlg(_L("Fixing through NetFabb"), "", 100,
-                                    nullptr, // ! parent of the wxProgressDialog should be nullptr to avoid flickering during the model fixing
+    wxProgressDialog progress_dlg(_L("Fixing through NetFabb"), "", 100, find_toplevel_parent(plater),
                                     wxPD_AUTO_HIDE | wxPD_APP_MODAL | wxPD_CAN_ABORT);
     int model_idx{ 0 };
     if (vol_idxs.empty()) {
         int vol_idx{ -1 };
         for (int obj_idx : obj_idxs) {
-            if (object(obj_idx)->get_mesh_errors_count(vol_idx) == 0)
+#if !FIX_THROUGH_NETFABB_ALWAYS
+            if (object(obj_idx)->get_repaired_errors_count(vol_idx) == 0)
                 continue;
+#endif // FIX_THROUGH_NETFABB_ALWAYS
             if (!fix_and_update_progress(obj_idx, vol_idx, model_idx, progress_dlg, succes_models, failed_models))
                 break;
             model_idx++;
@@ -4123,11 +4145,11 @@ void ObjectList::fix_through_netfabb()
     // Close the progress dialog
     progress_dlg.Update(100, "");
 
-    // Show info message
+    // Show info notification
     wxString msg;
     wxString bullet_suf = "\n   - ";
     if (!succes_models.empty()) {
-        msg = _L_PLURAL("Folowing model is repaired successfully", "Folowing models are repaired successfully", succes_models.size()) + ":";
+        msg = _L_PLURAL("The following model was repaired successfully", "The following models were repaired successfully", succes_models.size()) + ":";
         for (auto& model : succes_models)
             msg += bullet_suf + from_u8(model);
         msg += "\n\n";
@@ -4139,9 +4161,7 @@ void ObjectList::fix_through_netfabb()
     }
     if (msg.IsEmpty())
         msg = _L("Repairing was canceled");
-    // !!! Use wxMessageDialog instead of MessageDialog here
-    // It will not be "dark moded" but the Application will not lose a focus after model repairing
-    wxMessageDialog(nullptr, msg, _L("Model Repair by the Netfabb service"), wxICON_INFORMATION | wxOK).ShowModal();
+    plater->get_notification_manager()->push_notification(NotificationType::NetfabbFinished, NotificationManager::NotificationLevel::PrintInfoShortNotificationLevel, boost::nowide::narrow(msg));
 }
 
 void ObjectList::simplify()
@@ -4163,24 +4183,18 @@ void ObjectList::simplify()
 
 void ObjectList::update_item_error_icon(const int obj_idx, const int vol_idx) const 
 {
-    const wxDataViewItem item = vol_idx <0 ? m_objects_model->GetItemById(obj_idx) :
-                                m_objects_model->GetItemByVolumeId(obj_idx, vol_idx);
-    if (!item)
+    auto obj = object(obj_idx);
+    if (wxDataViewItem obj_item = m_objects_model->GetItemById(obj_idx)) {
+        const std::string& icon_name = get_warning_icon_name(obj->get_object_stl_stats());
+        m_objects_model->UpdateWarningIcon(obj_item, icon_name);
+    }
+
+    if (vol_idx < 0)
         return;
 
-    if (get_mesh_errors_count(obj_idx, vol_idx) == 0)
-    {
-        // if whole object has no errors more,
-        if (get_mesh_errors_count(obj_idx) == 0)
-            // unmark all items in the object
-            m_objects_model->DeleteWarningIcon(vol_idx >= 0 ? m_objects_model->GetParent(item) : item, true);
-        else
-            // unmark fixed item only
-            m_objects_model->DeleteWarningIcon(item);
-    }
-    else {
-        auto obj = object(obj_idx);
-        m_objects_model->AddWarningIcon(item, get_warning_icon_name(vol_idx < 0 ? obj->mesh().stats() : obj->volumes[vol_idx]->mesh().stats()));
+    if (wxDataViewItem vol_item = m_objects_model->GetItemByVolumeId(obj_idx, vol_idx)) {
+        const std::string& icon_name = get_warning_icon_name(obj->volumes[vol_idx]->mesh().stats());
+        m_objects_model->UpdateWarningIcon(vol_item, icon_name);
     }
 }
 
@@ -4237,10 +4251,7 @@ void ObjectList::OnEditingDone(wxDataViewEvent &event)
     const auto renderer = dynamic_cast<BitmapTextRenderer*>(GetColumn(colName)->GetRenderer());
 
     if (renderer->WasCanceled())
-		wxTheApp->CallAfter([this]{
-			show_error(this, _(L("The supplied name is not valid;")) + "\n" +
-				             _(L("the following characters are not allowed:")) + " <>:/\\|?*\"");
-		});
+		wxTheApp->CallAfter([this]{ Plater::show_illegal_characters_warning(this); });
 
 #ifdef __WXMSW__
 	// Workaround for entering the column editing mode on Windows. Simulate keyboard enter when another column of the active line is selected.

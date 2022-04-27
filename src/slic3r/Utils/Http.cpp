@@ -104,6 +104,7 @@ struct Http::priv
 {
 	enum {
 		DEFAULT_TIMEOUT_CONNECT = 10,
+        DEFAULT_TIMEOUT_MAX = 0,
 		DEFAULT_SIZE_LIMIT = 5 * 1024 * 1024,
 	};
 
@@ -126,6 +127,7 @@ struct Http::priv
 	Http::CompleteFn completefn;
 	Http::ErrorFn errorfn;
 	Http::ProgressFn progressfn;
+	Http::IPResolveFn ipresolvefn;
 
 	priv(const std::string &url);
 	~priv();
@@ -137,6 +139,7 @@ struct Http::priv
 	static size_t form_file_read_cb(char *buffer, size_t size, size_t nitems, void *userp);
 
 	void set_timeout_connect(long timeout);
+    void set_timeout_max(long timeout);
 	void form_add_file(const char *name, const fs::path &path, const char* filename);
 	void set_post_body(const fs::path &path);
 	void set_post_body(const std::string &body);
@@ -163,6 +166,7 @@ Http::priv::priv(const std::string &url)
 	}
 
 	set_timeout_connect(DEFAULT_TIMEOUT_CONNECT);
+    set_timeout_max(DEFAULT_TIMEOUT_MAX);
 	::curl_easy_setopt(curl, CURLOPT_URL, url.c_str());   // curl makes a copy internally
 	::curl_easy_setopt(curl, CURLOPT_USERAGENT, SLIC3R_APP_NAME "/" SLIC3R_VERSION);
 	::curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, &error_buffer.front());
@@ -203,7 +207,6 @@ size_t Http::priv::writecb(void *data, size_t size, size_t nmemb, void *userp)
 	auto self = static_cast<priv*>(userp);
 	const char *cdata = static_cast<char*>(data);
 	const size_t realsize = size * nmemb;
-
 	const size_t limit = self->limit > 0 ? self->limit : DEFAULT_SIZE_LIMIT;
 	if (self->buffer.size() + realsize > limit) {
 		// This makes curl_easy_perform return CURLE_WRITE_ERROR
@@ -251,6 +254,11 @@ size_t Http::priv::form_file_read_cb(char *buffer, size_t size, size_t nitems, v
 void Http::priv::set_timeout_connect(long timeout)
 {
 	::curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, timeout);
+}
+
+void Http::priv::set_timeout_max(long timeout)
+{
+    ::curl_easy_setopt(curl, CURLOPT_TIMEOUT, timeout);
 }
 
 void Http::priv::form_add_file(const char *name, const fs::path &path, const char* filename)
@@ -382,6 +390,13 @@ void Http::priv::http_perform()
 			if (errorfn) { errorfn(std::move(buffer), std::string(), http_status); }
 		} else {
 			if (completefn) { completefn(std::move(buffer), http_status); }
+			if (ipresolvefn) {
+				char* ct;
+				res = curl_easy_getinfo(curl, CURLINFO_PRIMARY_IP, &ct);
+				if ((CURLE_OK == res) && ct) {
+					ipresolvefn(ct);
+				}
+			}
 		}
 	}
 }
@@ -407,6 +422,13 @@ Http& Http::timeout_connect(long timeout)
 	if (timeout < 1) { timeout = priv::DEFAULT_TIMEOUT_CONNECT; }
 	if (p) { p->set_timeout_connect(timeout); }
 	return *this;
+}
+
+Http& Http::timeout_max(long timeout)
+{
+    if (timeout < 1) { timeout = priv::DEFAULT_TIMEOUT_MAX; }
+    if (p) { p->set_timeout_max(timeout); }
+    return *this;
 }
 
 Http& Http::size_limit(size_t sizeLimit)
@@ -536,6 +558,12 @@ Http& Http::on_error(ErrorFn fn)
 Http& Http::on_progress(ProgressFn fn)
 {
 	if (p) { p->progressfn = std::move(fn); }
+	return *this;
+}
+
+Http& Http::on_ip_resolve(IPResolveFn fn)
+{
+	if (p) { p->ipresolvefn = std::move(fn); }
 	return *this;
 }
 

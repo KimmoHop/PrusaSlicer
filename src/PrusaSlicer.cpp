@@ -498,8 +498,6 @@ int CLI::run(int argc, char **argv)
                 std::string outfile = m_config.opt_string("output");
                 Print       fff_print;
                 SLAPrint    sla_print;
-                SL1Archive  sla_archive(sla_print.printer_config());
-                sla_print.set_printer(&sla_archive);
                 sla_print.set_status_callback(
                             [](const PrintBase::SlicingStatus& s)
                 {
@@ -539,7 +537,7 @@ int CLI::run(int argc, char **argv)
                             outfile = sla_print.output_filepath(outfile);
                             // We need to finalize the filename beforehand because the export function sets the filename inside the zip metadata
                             outfile_final = sla_print.print_statistics().finalize_output_path(outfile);
-                            sla_archive.export_print(outfile_final, sla_print);
+                            sla_print.export_print(outfile_final);
                         }
                         if (outfile != outfile_final) {
                             if (Slic3r::rename_file(outfile, outfile_final)) {
@@ -595,6 +593,19 @@ int CLI::run(int argc, char **argv)
 
     if (start_gui) {
 #ifdef SLIC3R_GUI
+    #if !defined(_WIN32) && !defined(__APPLE__)
+        // likely some linux / unix system
+        const char *display = boost::nowide::getenv("DISPLAY");
+        // const char *wayland_display = boost::nowide::getenv("WAYLAND_DISPLAY");
+        //if (! ((display && *display) || (wayland_display && *wayland_display))) {
+        if (! (display && *display)) {
+            // DISPLAY not set.
+            boost::nowide::cerr << "DISPLAY not set, GUI mode not available." << std::endl << std::endl;
+            this->print_help(false);
+            // Indicate an error.
+            return 1;
+        }
+    #endif // some linux / unix system
         Slic3r::GUI::GUI_InitParams params;
         params.argc = argc;
         params.argv = argv;
@@ -705,7 +716,7 @@ bool CLI::setup(int argc, char **argv)
 
     // Initialize with defaults.
     for (const t_optiondef_map *options : { &cli_actions_config_def.options, &cli_transform_config_def.options, &cli_misc_config_def.options })
-        for (const std::pair<t_config_option_key, ConfigOptionDef> &optdef : *options)
+        for (const t_optiondef_map::value_type &optdef : *options)
             m_config.option(optdef.first, true);
 
     set_data_dir(m_config.opt_string("datadir"));
@@ -809,6 +820,36 @@ std::string CLI::output_filepath(const Model &model, IO::ExportFormat format) co
     }
     return proposed_path.string();
 }
+
+// __has_feature() is used later for Clang, this is for compatibility with other compilers (such as GCC and MSVC)
+#ifndef __has_feature
+#   define __has_feature(x) 0
+#endif
+
+#if __has_feature(address_sanitizer) || defined(__SANITIZE_ADDRESS__)
+extern "C" {
+    // Based on https://github.com/google/skia/blob/main/tools/LsanSuppressions.cpp
+    const char *__lsan_default_suppressions() {
+        return "leak:libfontconfig\n"           // FontConfig looks like it leaks, but it doesn't.
+               "leak:libfreetype\n"             // Unsure, appeared upgrading Debian 9->10.
+               "leak:libGLX_nvidia.so\n"        // For NVidia driver.
+               "leak:libnvidia-glcore.so\n"     // For NVidia driver.
+               "leak:libnvidia-tls.so\n"        // For NVidia driver.
+               "leak:terminator_CreateDevice\n" // For Intel Vulkan drivers.
+               "leak:swrast_dri.so\n"           // For Mesa 3D software driver.
+            ;
+    }
+}
+#endif
+
+#if defined(SLIC3R_UBSAN)
+extern "C" {
+    // Enable printing stacktrace by default. It can be disabled by running PrusaSlicer with "UBSAN_OPTIONS=print_stacktrace=0".
+    const char *__ubsan_default_options() {
+        return "print_stacktrace=1";
+    }
+}
+#endif
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 extern "C" {

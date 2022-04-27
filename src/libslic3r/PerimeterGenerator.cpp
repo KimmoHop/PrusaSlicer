@@ -8,7 +8,7 @@
 
 namespace Slic3r {
 
-static ExtrusionPaths thick_polyline_to_extrusion_paths(const ThickPolyline &thick_polyline, ExtrusionRole role, const Flow &flow, const float tolerance)
+static ExtrusionPaths thick_polyline_to_extrusion_paths(const ThickPolyline &thick_polyline, ExtrusionRole role, const Flow &flow, const float tolerance, const float merge_tolerance)
 {
     ExtrusionPaths paths;
     ExtrusionPath path(role);
@@ -71,7 +71,7 @@ static ExtrusionPaths thick_polyline_to_extrusion_paths(const ThickPolyline &thi
             path.height      = new_flow.height();
         } else {
             thickness_delta = fabs(scale_(flow.width()) - w);
-            if (thickness_delta <= tolerance) {
+            if (thickness_delta <= merge_tolerance) {
                 // the width difference between this line and the current flow width is 
                 // within the accepted tolerance
                 path.polyline.append(line.b);
@@ -95,7 +95,7 @@ static void variable_width(const ThickPolylines& polylines, ExtrusionRole role, 
 	// of segments, and any pruning shall be performed before we apply this tolerance.
 	const float tolerance = float(scale_(0.05));
 	for (const ThickPolyline &p : polylines) {
-		ExtrusionPaths paths = thick_polyline_to_extrusion_paths(p, role, flow, tolerance);
+		ExtrusionPaths paths = thick_polyline_to_extrusion_paths(p, role, flow, tolerance, tolerance);
 		// Append paths to collection.
 		if (! paths.empty()) {
 			if (paths.front().first_point() == paths.back().last_point())
@@ -322,7 +322,7 @@ void PerimeterGenerator::process()
     for (const Surface &surface : this->slices->surfaces) {
         // detect how many perimeters must be generated for this island
         int        loop_number = this->config->perimeters + surface.extra_perimeters - 1;  // 0-indexed loops
-        ExPolygons last        = union_ex(surface.expolygon.simplify_p(SCALED_RESOLUTION));
+        ExPolygons last        = union_ex(surface.expolygon.simplify_p(m_scaled_resolution));
         ExPolygons gaps;
         if (loop_number >= 0) {
             // In case no perimeters are to be generated, loop_number will equal to -1.
@@ -347,10 +347,10 @@ void PerimeterGenerator::process()
                         // the following offset2 ensures almost nothing in @thin_walls is narrower than $min_width
                         // (actually, something larger than that still may exist due to mitering or other causes)
                         coord_t min_width = coord_t(scale_(this->ext_perimeter_flow.nozzle_diameter() / 3));
-                        ExPolygons expp = offset2_ex(
+                        ExPolygons expp = opening_ex(
                             // medial axis requires non-overlapping geometry
                             diff_ex(last, offset(offsets, float(ext_perimeter_width / 2.) + ClipperSafetyOffset)),
-                            - float(min_width / 2.), float(min_width / 2.));
+                            float(min_width / 2.));
                         // the maximum thickness of our thin wall area is equal to the minimum thickness of a single loop
                         for (ExPolygon &ex : expp)
                             ex.medial_axis(ext_perimeter_width + ext_perimeter_spacing2, min_width, &thin_walls);
@@ -495,7 +495,7 @@ void PerimeterGenerator::process()
             double max = 2. * perimeter_spacing;
             ExPolygons gaps_ex = diff_ex(
                 //FIXME offset2 would be enough and cheaper.
-                offset2_ex(gaps, - float(min / 2.), float(min / 2.)),
+                opening_ex(gaps, float(min / 2.)),
                 offset2_ex(gaps, - float(max / 2.), float(max / 2. + ClipperSafetyOffset)));
             ThickPolylines polylines;
             for (const ExPolygon &ex : gaps_ex)
@@ -533,7 +533,7 @@ void PerimeterGenerator::process()
         // simplify infill contours according to resolution
         Polygons pp;
         for (ExPolygon &ex : last)
-            ex.simplify_p(SCALED_RESOLUTION, &pp);
+            ex.simplify_p(m_scaled_resolution, &pp);
         // collapse too narrow infill areas
         coord_t min_perimeter_infill_spacing = coord_t(solid_infill_spacing * (1. - INSET_OVERLAP_TOLERANCE));
         // append infill areas to fill_surfaces

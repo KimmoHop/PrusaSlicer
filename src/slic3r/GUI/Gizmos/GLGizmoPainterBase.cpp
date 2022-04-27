@@ -8,59 +8,46 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/OpenGLManager.hpp"
+#include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-
+#include <memory>
+#include <optional>
 
 namespace Slic3r::GUI {
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+std::shared_ptr<GLModel> GLGizmoPainterBase::s_sphere = nullptr;
+#else
+std::shared_ptr<GLIndexedVertexArray> GLGizmoPainterBase::s_sphere = nullptr;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 GLGizmoPainterBase::GLGizmoPainterBase(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
 {
-    // Make sphere and save it into a vertex buffer.
-    m_vbo_sphere.load_its_flat_shading(its_make_sphere(1., (2*M_PI)/24.));
-    m_vbo_sphere.finalize_geometry(true);
 }
 
-// port of 948bc382655993721d93d3b9fce9b0186fcfb211
-void GLGizmoPainterBase::activate_internal_undo_redo_stack(bool activate)
+GLGizmoPainterBase::~GLGizmoPainterBase()
 {
-    Plater* plater = wxGetApp().plater();
-
-    // Following is needed to prevent taking an extra snapshot when the activation of
-    // the internal stack happens when the gizmo is already active (such as open gizmo,
-    // close gizmo, undo, start painting). The internal stack does not activate on the
-    // undo, because that would obliterate all future of the main stack (user would
-    // have to close the gizmo himself, he has no access to main undo/redo after the
-    // internal stack opens). We don't want the "entering" snapshot taken in this case,
-    // because there already is one.
-    std::string last_snapshot_name;
-    plater->undo_redo_topmost_string_getter(plater->can_undo(), last_snapshot_name);
-
-    if (activate && !m_internal_stack_active) {
-        if (std::string str = this->get_gizmo_entering_text(); last_snapshot_name != str)
-            Plater::TakeSnapshot(plater, str);
-        plater->enter_gizmos_stack();
-        m_internal_stack_active = true;
-    }
-    if (!activate && m_internal_stack_active) {
-        plater->leave_gizmos_stack();
-        if (std::string str = this->get_gizmo_leaving_text(); last_snapshot_name != str)
-            Plater::TakeSnapshot(plater, str);
-        m_internal_stack_active = false;
-    }
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    if (s_sphere != nullptr)
+        s_sphere.reset();
+#else
+    if (s_sphere != nullptr && s_sphere->has_VBOs())
+        s_sphere->release_geometry();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 
-void GLGizmoPainterBase::set_painter_gizmo_data(const Selection& selection)
+void GLGizmoPainterBase::data_changed()
 {
     if (m_state != On)
         return;
 
     const ModelObject* mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
-
+    const Selection &  selection = m_parent.get_selection();
     if (mo && selection.is_from_single_instance()
      && (m_schedule_update || mo->id() != m_old_mo_id || mo->volumes.size() != m_old_volumes_size))
     {
@@ -71,42 +58,40 @@ void GLGizmoPainterBase::set_painter_gizmo_data(const Selection& selection)
     }
 }
 
-
-
-void GLGizmoPainterBase::render_triangles(const Selection& selection, const bool use_polygon_offset_fill) const
+GLGizmoPainterBase::ClippingPlaneDataWrapper GLGizmoPainterBase::get_clipping_plane_data() const
 {
-    const ModelObject* mo = m_c->selection_info()->model_object();
-
-    ScopeGuard offset_fill_guard([&use_polygon_offset_fill]() {
-        if (use_polygon_offset_fill)
-            glsafe(::glDisable(GL_POLYGON_OFFSET_FILL));
-    });
-    if (use_polygon_offset_fill) {
-        glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
-        glsafe(::glPolygonOffset(-5.0, -5.0));
-    }
-
+    ClippingPlaneDataWrapper clp_data_out{{0.f, 0.f, 1.f, FLT_MAX}, {-FLT_MAX, FLT_MAX}};
     // Take care of the clipping plane. The normal of the clipping plane is
     // saved with opposite sign than we need to pass to OpenGL (FIXME)
-    bool clipping_plane_active = m_c->object_clipper()->get_position() != 0.;
-    float clp_dataf[4] = {0.f, 0.f, 1.f, FLT_MAX};
-    if (clipping_plane_active) {
-        const ClippingPlane* clp = m_c->object_clipper()->get_clipping_plane();
-        for (size_t i=0; i<3; ++i)
-            clp_dataf[i] = -1.f * float(clp->get_data()[i]);
-        clp_dataf[3] = float(clp->get_data()[3]);
+    if (bool clipping_plane_active = m_c->object_clipper()->get_position() != 0.; clipping_plane_active) {
+        const ClippingPlane *clp = m_c->object_clipper()->get_clipping_plane();
+        for (size_t i = 0; i < 3; ++i)
+            clp_data_out.clp_dataf[i] = -1.f * float(clp->get_data()[i]);
+        clp_data_out.clp_dataf[3] = float(clp->get_data()[3]);
     }
 
-    auto *shader = wxGetApp().get_shader("gouraud");
+    // z_range is calculated in the same way as in GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type)
+    if (m_c->get_canvas()->get_use_clipping_planes()) {
+        const std::array<ClippingPlane, 2> &clps = m_c->get_canvas()->get_clipping_planes();
+        clp_data_out.z_range                     = {float(-clps[0].get_data()[3]), float(clps[1].get_data()[3])};
+    }
+
+    return clp_data_out;
+}
+
+void GLGizmoPainterBase::render_triangles(const Selection& selection) const
+{
+    auto* shader = wxGetApp().get_shader("gouraud");
     if (! shader)
         return;
     shader->start_using();
     shader->set_uniform("slope.actived", false);
-    shader->set_uniform("print_box.actived", false);
-    shader->set_uniform("clipping_plane", clp_dataf, 4);
+    shader->set_uniform("print_volume.type", 0);
+    shader->set_uniform("clipping_plane", this->get_clipping_plane_data().clp_dataf);
     ScopeGuard guard([shader]() { if (shader) shader->stop_using(); });
 
-    int mesh_id = -1;
+    const ModelObject *mo      = m_c->selection_info()->model_object();
+    int                mesh_id = -1;
     for (const ModelVolume* mv : mo->volumes) {
         if (! mv->is_model_part())
             continue;
@@ -121,25 +106,36 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection, const bool
         if (is_left_handed)
             glsafe(::glFrontFace(GL_CW));
 
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        const Transform3d matrix = camera.get_view_matrix() * trafo_matrix;
+        shader->set_uniform("view_model_matrix", matrix);
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+        shader->set_uniform("normal_matrix", (Matrix3d)matrix.matrix().block(0, 0, 3, 3).inverse().transpose());
+#else
         glsafe(::glPushMatrix());
         glsafe(::glMultMatrixd(trafo_matrix.data()));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
         // For printers with multiple extruders, it is necessary to pass trafo_matrix
         // to the shader input variable print_box.volume_world_matrix before
         // rendering the painted triangles. When this matrix is not set, the
         // wrong transformation matrix is used for "Clipping of view".
-        shader->set_uniform("print_box.volume_world_matrix", trafo_matrix);
+        shader->set_uniform("volume_world_matrix", trafo_matrix);
 
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        m_triangle_selectors[mesh_id]->render(m_imgui, trafo_matrix);
+#else
         m_triangle_selectors[mesh_id]->render(m_imgui);
 
         glsafe(::glPopMatrix());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         if (is_left_handed)
             glsafe(::glFrontFace(GL_CCW));
     }
 }
 
-
-void GLGizmoPainterBase::render_cursor() const
+void GLGizmoPainterBase::render_cursor()
 {
     // First check that the mouse pointer is on an object.
     const ModelObject* mo = m_c->selection_info()->model_object();
@@ -166,79 +162,187 @@ void GLGizmoPainterBase::render_cursor() const
     }
 }
 
-
-
-void GLGizmoPainterBase::render_cursor_circle() const
+void GLGizmoPainterBase::render_cursor_circle()
 {
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     const Camera &camera   = wxGetApp().plater()->get_camera();
-    auto          zoom     = (float) camera.get_zoom();
-    float         inv_zoom = (zoom != 0.0f) ? 1.0f / zoom : 0.0f;
+    const float   zoom     = float(camera.get_zoom());
+    const float   inv_zoom = (zoom != 0.0f) ? 1.0f / zoom : 0.0f;
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 
-    Size  cnv_size        = m_parent.get_canvas_size();
-    float cnv_half_width  = 0.5f * (float) cnv_size.get_width();
-    float cnv_half_height = 0.5f * (float) cnv_size.get_height();
-    if ((cnv_half_width == 0.0f) || (cnv_half_height == 0.0f))
+    const Size cnv_size = m_parent.get_canvas_size();
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    const float cnv_width  = float(cnv_size.get_width());
+    const float cnv_height = float(cnv_size.get_height());
+    if (cnv_width == 0.0f || cnv_height == 0.0f)
         return;
-    Vec2d mouse_pos(m_parent.get_local_mouse_position()(0), m_parent.get_local_mouse_position()(1));
-    Vec2d center(mouse_pos(0) - cnv_half_width, cnv_half_height - mouse_pos(1));
+
+    const float cnv_inv_width  = 1.0f / cnv_width;
+    const float cnv_inv_height = 1.0f / cnv_height;
+
+    const Vec2d center = m_parent.get_local_mouse_position();
+    const float radius = m_cursor_radius * float(wxGetApp().plater()->get_camera().get_zoom());
+#else
+    const float cnv_half_width  = 0.5f * float(cnv_size.get_width());
+    const float cnv_half_height = 0.5f * float(cnv_size.get_height());
+    if (cnv_half_width == 0.0f || cnv_half_height == 0.0f)
+        return;
+    const Vec2d mouse_pos(m_parent.get_local_mouse_position().x(), m_parent.get_local_mouse_position().y());
+    Vec2d center(mouse_pos.x() - cnv_half_width, cnv_half_height - mouse_pos.y());
     center = center * inv_zoom;
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
     glsafe(::glLineWidth(1.5f));
-    static const std::array<float, 3> color = {0.f, 1.f, 0.3f};
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+    static const std::array<float, 3> color = { 0.f, 1.f, 0.3f };
     glsafe(::glColor3fv(color.data()));
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
     glsafe(::glDisable(GL_DEPTH_TEST));
 
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glPushMatrix());
     glsafe(::glLoadIdentity());
     // ensure that the circle is renderered inside the frustrum
     glsafe(::glTranslated(0.0, 0.0, -(camera.get_near_z() + 0.5)));
     // ensure that the overlay fits the frustrum near z plane
-    double gui_scale = camera.get_gui_scale();
+    const double gui_scale = camera.get_gui_scale();
     glsafe(::glScaled(gui_scale, gui_scale, 1.0));
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 
     glsafe(::glPushAttrib(GL_ENABLE_BIT));
     glsafe(::glLineStipple(4, 0xAAAA));
     glsafe(::glEnable(GL_LINE_STIPPLE));
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    if (!m_circle.is_initialized() || !m_old_center.isApprox(center) || std::abs(m_old_cursor_radius - radius) > EPSILON) {
+        m_old_cursor_radius = radius;
+#else
+    if (!m_circle.is_initialized() || !m_old_center.isApprox(center) || std::abs(m_old_cursor_radius - m_cursor_radius) > EPSILON) {
+        m_old_cursor_radius = m_cursor_radius;
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+        m_old_center = center;
+        m_circle.reset();
+
+        GLModel::Geometry init_data;
+        static const unsigned int StepsCount = 32;
+        static const float StepSize = 2.0f * float(PI) / float(StepsCount);
+        init_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2 };
+        init_data.color  = { 0.0f, 1.0f, 0.3f, 1.0f };
+        init_data.reserve_vertices(StepsCount);
+        init_data.reserve_indices(StepsCount);
+
+        // vertices + indices
+        for (unsigned int i = 0; i < StepsCount; ++i) {
+            const float angle = float(i) * StepSize;
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+            init_data.add_vertex(Vec2f(2.0f * ((center.x() + ::cos(angle) * radius) * cnv_inv_width - 0.5f),
+                                       -2.0f * ((center.y() + ::sin(angle) * radius) * cnv_inv_height - 0.5f)));
+#else
+            init_data.add_vertex(Vec2f(center.x() + ::cos(angle) * m_cursor_radius, center.y() + ::sin(angle) * m_cursor_radius));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+            init_data.add_index(i);
+        }
+
+        m_circle.init_from(std::move(init_data));
+    }
+
+    GLShaderProgram* shader = GUI::wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+        shader->set_uniform("projection_matrix", Transform3d::Identity());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+        m_circle.render();
+        shader->stop_using();
+    }
+#else
     ::glBegin(GL_LINE_LOOP);
     for (double angle=0; angle<2*M_PI; angle+=M_PI/20.)
         ::glVertex2f(GLfloat(center.x()+m_cursor_radius*cos(angle)), GLfloat(center.y()+m_cursor_radius*sin(angle)));
     glsafe(::glEnd());
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     glsafe(::glPopAttrib());
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
 
 void GLGizmoPainterBase::render_cursor_sphere(const Transform3d& trafo) const
 {
+    if (s_sphere == nullptr) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        s_sphere = std::make_shared<GLModel>();
+        s_sphere->init_from(its_make_sphere(1.0, double(PI) / 12.0));
+#else
+        s_sphere = std::make_shared<GLIndexedVertexArray>();
+        s_sphere->load_its_flat_shading(its_make_sphere(1.0, double(PI) / 12.0));
+        s_sphere->finalize_geometry(true);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+    }
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader == nullptr)
+        return;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
     const Transform3d complete_scaling_matrix_inverse = Geometry::Transformation(trafo).get_matrix(true, true, false, true).inverse();
     const bool is_left_handed = Geometry::Transformation(trafo).is_left_handed();
 
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glPushMatrix());
     glsafe(::glMultMatrixd(trafo.data()));
     // Inverse matrix of the instance scaling is applied so that the mark does not scale with the object.
-    glsafe(::glTranslatef(m_rr.hit(0), m_rr.hit(1), m_rr.hit(2)));
+    glsafe(::glTranslatef(m_rr.hit.x(), m_rr.hit.y(), m_rr.hit.z()));
     glsafe(::glMultMatrixd(complete_scaling_matrix_inverse.data()));
     glsafe(::glScaled(m_cursor_radius, m_cursor_radius, m_cursor_radius));
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 
     if (is_left_handed)
         glFrontFace(GL_CW);
 
-    std::array<float, 4> render_color = {0.f, 0.f, 0.f, 0.25f};
+    ColorRGBA render_color = { 0.0f, 0.0f, 0.0f, 0.25f };
     if (m_button_down == Button::Left)
         render_color = this->get_cursor_sphere_left_button_color();
     else if (m_button_down == Button::Right)
         render_color = this->get_cursor_sphere_right_button_color();
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    shader->start_using();
+
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    Transform3d view_model_matrix = camera.get_view_matrix() * trafo *
+        Geometry::assemble_transform(m_rr.hit.cast<double>()) * complete_scaling_matrix_inverse *
+        Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), m_cursor_radius * Vec3d::Ones());
+
+    shader->set_uniform("view_model_matrix", view_model_matrix);
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+
+    assert(s_sphere != nullptr);
+    s_sphere->set_color(render_color);
+#else
     glsafe(::glColor4fv(render_color.data()));
 
-    m_vbo_sphere.render();
+    assert(s_sphere != nullptr);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+    s_sphere->render();
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    shader->stop_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     if (is_left_handed)
         glFrontFace(GL_CCW);
 
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 }
 
 
@@ -253,6 +357,126 @@ bool GLGizmoPainterBase::is_mesh_point_clipped(const Vec3d& point, const Transfo
     return m_c->object_clipper()->get_clipping_plane()->is_point_clipped(transformed_point);
 }
 
+// Interpolate points between the previous and current mouse positions, which are then projected onto the object.
+// Returned projected mouse positions are grouped by mesh_idx. It may contain multiple std::vector<GLGizmoPainterBase::ProjectedMousePosition>
+// with the same mesh_idx, but all items in std::vector<GLGizmoPainterBase::ProjectedMousePosition> always have the same mesh_idx.
+std::vector<std::vector<GLGizmoPainterBase::ProjectedMousePosition>> GLGizmoPainterBase::get_projected_mouse_positions(const Vec2d &mouse_position, const double resolution, const std::vector<Transform3d> &trafo_matrices) const
+{
+    // List of mouse positions that will be used as seeds for painting.
+    std::vector<Vec2d> mouse_positions{mouse_position};
+    if (m_last_mouse_click != Vec2d::Zero()) {
+        // In case current mouse position is far from the last one,
+        // add several positions from between into the list, so there
+        // are no gaps in the painted region.
+        if (size_t patches_in_between = size_t((mouse_position - m_last_mouse_click).norm() / resolution); patches_in_between > 0) {
+            const Vec2d diff = (m_last_mouse_click - mouse_position) / (patches_in_between + 1);
+            for (size_t patch_idx = 1; patch_idx <= patches_in_between; ++patch_idx)
+                mouse_positions.emplace_back(mouse_position + patch_idx * diff);
+            mouse_positions.emplace_back(m_last_mouse_click);
+        }
+    }
+
+    const Camera                       &camera = wxGetApp().plater()->get_camera();
+    std::vector<ProjectedMousePosition> mesh_hit_points;
+    mesh_hit_points.reserve(mouse_positions.size());
+
+    // In mesh_hit_points only the last item could have mesh_id == -1, any other items mustn't.
+    for (const Vec2d &mp : mouse_positions) {
+        update_raycast_cache(mp, camera, trafo_matrices);
+        mesh_hit_points.push_back({m_rr.hit, m_rr.mesh_id, m_rr.facet});
+        if (m_rr.mesh_id == -1)
+            break;
+    }
+
+    // Divide mesh_hit_points into groups with the same mesh_idx. It may contain multiple groups with the same mesh_idx.
+    std::vector<std::vector<ProjectedMousePosition>> mesh_hit_points_by_mesh;
+    for (size_t prev_mesh_hit_point = 0, curr_mesh_hit_point = 0; curr_mesh_hit_point < mesh_hit_points.size(); ++curr_mesh_hit_point) {
+        size_t next_mesh_hit_point = curr_mesh_hit_point + 1;
+        if (next_mesh_hit_point >= mesh_hit_points.size() || mesh_hit_points[curr_mesh_hit_point].mesh_idx != mesh_hit_points[next_mesh_hit_point].mesh_idx) {
+            mesh_hit_points_by_mesh.emplace_back();
+            mesh_hit_points_by_mesh.back().insert(mesh_hit_points_by_mesh.back().end(), mesh_hit_points.begin() + int(prev_mesh_hit_point), mesh_hit_points.begin() + int(next_mesh_hit_point));
+            prev_mesh_hit_point = next_mesh_hit_point;
+        }
+    }
+
+    auto on_same_facet = [](std::vector<ProjectedMousePosition> &hit_points) -> bool {
+        for (const ProjectedMousePosition &mesh_hit_point : hit_points)
+            if (mesh_hit_point.facet_idx != hit_points.front().facet_idx)
+                return false;
+        return true;
+    };
+
+    struct Plane
+    {
+        Vec3d origin;
+        Vec3d first_axis;
+        Vec3d second_axis;
+    };
+    auto find_plane = [](std::vector<ProjectedMousePosition> &hit_points) -> std::optional<Plane> {
+        assert(hit_points.size() >= 3);
+        for (size_t third_idx = 2; third_idx < hit_points.size(); ++third_idx) {
+            const Vec3d &first_point  = hit_points[third_idx - 2].mesh_hit.cast<double>();
+            const Vec3d &second_point = hit_points[third_idx - 1].mesh_hit.cast<double>();
+            const Vec3d &third_point  = hit_points[third_idx].mesh_hit.cast<double>();
+
+            const Vec3d  first_vec    = first_point - second_point;
+            const Vec3d  second_vec   = third_point - second_point;
+
+            // If three points aren't collinear, then there exists only one plane going through all points.
+            if (first_vec.cross(second_vec).squaredNorm() > sqr(EPSILON)) {
+                const Vec3d first_axis_vec_n = first_vec.normalized();
+                // Make second_vec perpendicular to first_axis_vec_n using Gram–Schmidt orthogonalization process
+                const Vec3d second_axis_vec_n = (second_vec - (first_vec.dot(second_vec) / first_vec.dot(first_vec)) * first_vec).normalized();
+                return Plane{second_point, first_axis_vec_n, second_axis_vec_n};
+            }
+        }
+
+        return std::nullopt;
+    };
+
+    for(std::vector<ProjectedMousePosition> &hit_points : mesh_hit_points_by_mesh) {
+        assert(!hit_points.empty());
+        if (hit_points.back().mesh_idx == -1)
+            break;
+
+        if (hit_points.size() <= 2)
+            continue;
+
+        if (on_same_facet(hit_points)) {
+            hit_points = {hit_points.front(), hit_points.back()};
+        } else if (std::optional<Plane> plane = find_plane(hit_points); plane) {
+            Polyline polyline;
+            polyline.points.reserve(hit_points.size());
+            // Project hit_points into its plane to simplified them in the next step.
+            for (auto &hit_point : hit_points) {
+                const Vec3d &point  = hit_point.mesh_hit.cast<double>();
+                const double x_cord = plane->first_axis.dot(point - plane->origin);
+                const double y_cord = plane->second_axis.dot(point - plane->origin);
+                polyline.points.emplace_back(scale_(x_cord), scale_(y_cord));
+            }
+
+            polyline.simplify(scale_(m_cursor_radius) / 10.);
+
+            const int                           mesh_idx = hit_points.front().mesh_idx;
+            std::vector<ProjectedMousePosition> new_hit_points;
+            new_hit_points.reserve(polyline.points.size());
+            // Project 2D simplified hit_points beck to 3D.
+            for (const Point &point : polyline.points) {
+                const double x_cord        = unscale<double>(point.x());
+                const double y_cord        = unscale<double>(point.y());
+                const Vec3d  new_hit_point = plane->origin + x_cord * plane->first_axis + y_cord * plane->second_axis;
+                const int    facet_idx     = m_c->raycaster()->raycasters()[mesh_idx]->get_closest_facet(new_hit_point.cast<float>());
+                new_hit_points.push_back({new_hit_point.cast<float>(), mesh_idx, size_t(facet_idx)});
+            }
+
+            hit_points = new_hit_points;
+        } else {
+            hit_points = {hit_points.front(), hit_points.back()};
+        }
+    }
+
+    return mesh_hit_points_by_mesh;
+}
 
 // Following function is called from GLCanvas3D to inform the gizmo about a mouse/keyboard event.
 // The gizmo has an opportunity to react - if it does, it should return true so that the Canvas3D is
@@ -272,8 +496,8 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         }
         else if (alt_down) {
             if (m_tool_type == ToolType::BRUSH && (m_cursor_type == TriangleSelector::CursorType::SPHERE || m_cursor_type == TriangleSelector::CursorType::CIRCLE)) {
-                m_cursor_radius = action == SLAGizmoEventType::MouseWheelDown ? std::max(m_cursor_radius - CursorRadiusStep, CursorRadiusMin)
-                                                                              : std::min(m_cursor_radius + CursorRadiusStep, CursorRadiusMax);
+                m_cursor_radius = action == SLAGizmoEventType::MouseWheelDown ? std::max(m_cursor_radius - this->get_cursor_radius_step(), this->get_cursor_radius_min())
+                                                                              : std::min(m_cursor_radius + this->get_cursor_radius_step(), this->get_cursor_radius_max());
                 m_parent.set_as_dirty();
                 return true;
             } else if (m_tool_type == ToolType::SMART_FILL) {
@@ -281,7 +505,13 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                                                                                 : std::min(m_smart_fill_angle + SmartFillAngleStep, SmartFillAngleMax);
                 m_parent.set_as_dirty();
                 if (m_rr.mesh_id != -1) {
-                    m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), m_smart_fill_angle, true);
+                    const Selection     &selection                 = m_parent.get_selection();
+                    const ModelObject   *mo                        = m_c->selection_info()->model_object();
+                    const ModelInstance *mi                        = mo->instances[selection.get_instance_idx()];
+                    const Transform3d   trafo_matrix_not_translate = mi->get_transformation().get_matrix(true) * mo->volumes[m_rr.mesh_id]->get_matrix(true);
+                    const Transform3d   trafo_matrix = mi->get_transformation().get_matrix() * mo->volumes[m_rr.mesh_id]->get_matrix();
+                    m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, this->get_clipping_plane_in_volume_coordinates(trafo_matrix), m_smart_fill_angle,
+                                                                                   m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
                     m_triangle_selectors[m_rr.mesh_id]->request_update_render_data();
                     m_seed_fill_last_mesh_id = m_rr.mesh_id;
                 }
@@ -312,82 +542,86 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                 new_state = action == SLAGizmoEventType::LeftDown ? this->get_left_button_state_type() : this->get_right_button_state_type();
         }
 
-        const Camera        &camera         = wxGetApp().plater()->get_camera();
-        const Selection     &selection      = m_parent.get_selection();
-        const ModelObject   *mo             = m_c->selection_info()->model_object();
-        const ModelInstance *mi             = mo->instances[selection.get_instance_idx()];
-        const Transform3d   &instance_trafo = mi->get_transformation().get_matrix();
-
-        // List of mouse positions that will be used as seeds for painting.
-        std::vector<Vec2d> mouse_positions{mouse_position};
-
-        // In case current mouse position is far from the last one,
-        // add several positions from between into the list, so there
-        // are no gaps in the painted region.
-        {
-            if (m_last_mouse_click == Vec2d::Zero())
-                m_last_mouse_click = mouse_position;
-            // resolution describes minimal distance limit using circle radius
-            // as a unit (e.g., 2 would mean the patches will be touching).
-            double resolution = 0.7;
-            double diameter_px =  resolution  * m_cursor_radius * camera.get_zoom();
-            int patches_in_between = int(((mouse_position - m_last_mouse_click).norm() - diameter_px) / diameter_px);
-            if (patches_in_between > 0) {
-                Vec2d diff = (mouse_position - m_last_mouse_click)/(patches_in_between+1);
-                for (int i=1; i<=patches_in_between; ++i)
-                    mouse_positions.emplace_back(m_last_mouse_click + i*diff);
-            }
-        }
-        m_last_mouse_click = Vec2d::Zero(); // only actual hits should be saved
+        const Camera        &camera                      = wxGetApp().plater()->get_camera();
+        const Selection     &selection                   = m_parent.get_selection();
+        const ModelObject   *mo                          = m_c->selection_info()->model_object();
+        const ModelInstance *mi                          = mo->instances[selection.get_instance_idx()];
+        const Transform3d   instance_trafo               = mi->get_transformation().get_matrix();
+        const Transform3d   instance_trafo_not_translate = mi->get_transformation().get_matrix(true);
 
         // Precalculate transformations of individual meshes.
         std::vector<Transform3d> trafo_matrices;
-        for (const ModelVolume* mv : mo->volumes) {
-            if (mv->is_model_part())
+        std::vector<Transform3d> trafo_matrices_not_translate;
+        for (const ModelVolume *mv : mo->volumes)
+            if (mv->is_model_part()) {
                 trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
-        }
+                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix(true));
+            }
 
-        // Now "click" into all the prepared points and spill paint around them.
-        for (const Vec2d& mp : mouse_positions) {
-            update_raycast_cache(mp, camera, trafo_matrices);
+        std::vector<std::vector<ProjectedMousePosition>> projected_mouse_positions_by_mesh = get_projected_mouse_positions(mouse_position, 1., trafo_matrices);
+        m_last_mouse_click = Vec2d::Zero(); // only actual hits should be saved
 
-            bool dragging_while_painting = (action == SLAGizmoEventType::Dragging && m_button_down != Button::None);
+        for (const std::vector<ProjectedMousePosition> &projected_mouse_positions : projected_mouse_positions_by_mesh) {
+            assert(!projected_mouse_positions.empty());
+            const int  mesh_idx                = projected_mouse_positions.front().mesh_idx;
+            const bool dragging_while_painting = (action == SLAGizmoEventType::Dragging && m_button_down != Button::None);
 
             // The mouse button click detection is enabled when there is a valid hit.
             // Missing the object entirely
             // shall not capture the mouse.
-            if (m_rr.mesh_id != -1) {
+            if (mesh_idx != -1)
                 if (m_button_down == Button::None)
                     m_button_down = ((action == SLAGizmoEventType::LeftDown) ? Button::Left : Button::Right);
-            }
 
-            if (m_rr.mesh_id == -1) {
-                // In case we have no valid hit, we can return. The event will be stopped when
-                // dragging while painting (to prevent scene rotations and moving the object)
+            // In case we have no valid hit, we can return. The event will be stopped when
+            // dragging while painting (to prevent scene rotations and moving the object)
+            if (mesh_idx == -1)
                 return dragging_while_painting;
-            }
 
-            const Transform3d& trafo_matrix = trafo_matrices[m_rr.mesh_id];
+            const Transform3d &trafo_matrix               = trafo_matrices[mesh_idx];
+            const Transform3d &trafo_matrix_not_translate = trafo_matrices_not_translate[mesh_idx];
 
             // Calculate direction from camera to the hit (in mesh coords):
             Vec3f camera_pos = (trafo_matrix.inverse() * camera.get_position()).cast<float>();
 
-            assert(m_rr.mesh_id < int(m_triangle_selectors.size()));
+            assert(mesh_idx < int(m_triangle_selectors.size()));
+            const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
             if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
-                m_triangle_selectors[m_rr.mesh_id]->seed_fill_apply_on_triangles(new_state);
-                if (m_tool_type == ToolType::SMART_FILL)
-                    m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), m_smart_fill_angle, true);
-                else if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)
-                    m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), false, true);
-                else if (m_tool_type == ToolType::BUCKET_FILL)
-                    m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), true, true);
+                for(const ProjectedMousePosition &projected_mouse_position : projected_mouse_positions) {
+                    assert(projected_mouse_position.mesh_idx == mesh_idx);
+                    const Vec3f mesh_hit = projected_mouse_position.mesh_hit;
+                    const int facet_idx = int(projected_mouse_position.facet_idx);
+                    m_triangle_selectors[mesh_idx]->seed_fill_apply_on_triangles(new_state);
+                    if (m_tool_type == ToolType::SMART_FILL)
+                        m_triangle_selectors[mesh_idx]->seed_fill_select_triangles(mesh_hit, facet_idx, trafo_matrix_not_translate, clp, m_smart_fill_angle,
+                                                                                       m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
+                    else if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)
+                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, false, true);
+                    else if (m_tool_type == ToolType::BUCKET_FILL)
+                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, true, true);
 
-                m_seed_fill_last_mesh_id = -1;
-            } else if (m_tool_type == ToolType::BRUSH)
-                m_triangle_selectors[m_rr.mesh_id]->select_patch(m_rr.hit, int(m_rr.facet), camera_pos, m_cursor_radius, m_cursor_type,
-                                                                 new_state, trafo_matrix, m_triangle_splitting_enabled);
+                    m_seed_fill_last_mesh_id = -1;
+                }
+            } else if (m_tool_type == ToolType::BRUSH) {
+                assert(m_cursor_type == TriangleSelector::CursorType::CIRCLE || m_cursor_type == TriangleSelector::CursorType::SPHERE);
 
-            m_triangle_selectors[m_rr.mesh_id]->request_update_render_data();
+                if (projected_mouse_positions.size() == 1) {
+                    const ProjectedMousePosition             &first_position = projected_mouse_positions.front();
+                    std::unique_ptr<TriangleSelector::Cursor> cursor         = TriangleSelector::SinglePointCursor::cursor_factory(first_position.mesh_hit,
+                                                                                                                                   camera_pos, m_cursor_radius,
+                                                                                                                                   m_cursor_type, trafo_matrix, clp);
+                    m_triangle_selectors[mesh_idx]->select_patch(int(first_position.facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
+                                                                 m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+                } else {
+                    for (auto first_position_it = projected_mouse_positions.cbegin(); first_position_it != projected_mouse_positions.cend() - 1; ++first_position_it) {
+                        auto second_position_it = first_position_it + 1;
+                        std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::DoublePointCursor::cursor_factory(first_position_it->mesh_hit, second_position_it->mesh_hit, camera_pos, m_cursor_radius, m_cursor_type, trafo_matrix, clp);
+                        m_triangle_selectors[mesh_idx]->select_patch(int(first_position_it->facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate, m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+                    }
+                }
+            }
+
+            m_triangle_selectors[mesh_idx]->request_update_render_data();
             m_last_mouse_click = mouse_position;
         }
 
@@ -398,17 +632,21 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         if (m_triangle_selectors.empty())
             return false;
 
-        const Camera &       camera         = wxGetApp().plater()->get_camera();
-        const Selection &    selection      = m_parent.get_selection();
-        const ModelObject *  mo             = m_c->selection_info()->model_object();
-        const ModelInstance *mi             = mo->instances[selection.get_instance_idx()];
-        const Transform3d &  instance_trafo = mi->get_transformation().get_matrix();
+        const Camera        &camera                       = wxGetApp().plater()->get_camera();
+        const Selection     &selection                    = m_parent.get_selection();
+        const ModelObject   *mo                           = m_c->selection_info()->model_object();
+        const ModelInstance *mi                           = mo->instances[selection.get_instance_idx()];
+        const Transform3d    instance_trafo               = mi->get_transformation().get_matrix();
+        const Transform3d    instance_trafo_not_translate = mi->get_transformation().get_matrix(true);
 
         // Precalculate transformations of individual meshes.
         std::vector<Transform3d> trafo_matrices;
+        std::vector<Transform3d> trafo_matrices_not_translate;
         for (const ModelVolume *mv : mo->volumes)
-            if (mv->is_model_part())
+            if (mv->is_model_part()) {
                 trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
+                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix(true));
+            }
 
         // Now "click" into all the prepared points and spill paint around them.
         update_raycast_cache(mouse_position, camera, trafo_matrices);
@@ -433,13 +671,18 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         if(m_rr.mesh_id != m_seed_fill_last_mesh_id)
             seed_fill_unselect_all();
 
+        const Transform3d &trafo_matrix = trafo_matrices[m_rr.mesh_id];
+        const Transform3d &trafo_matrix_not_translate = trafo_matrices_not_translate[m_rr.mesh_id];
+
         assert(m_rr.mesh_id < int(m_triangle_selectors.size()));
+        const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
         if (m_tool_type == ToolType::SMART_FILL)
-            m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), m_smart_fill_angle);
+            m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, clp, m_smart_fill_angle,
+                                                                           m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
         else if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)
-            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), false);
+            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, false);
         else if (m_tool_type == ToolType::BUCKET_FILL)
-            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), true);
+            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, true);
         m_triangle_selectors[m_rr.mesh_id]->request_update_render_data();
         m_seed_fill_last_mesh_id = m_rr.mesh_id;
         return true;
@@ -449,8 +692,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
       && m_button_down != Button::None) {
         // Take snapshot and update ModelVolume data.
         wxString action_name = this->handle_snapshot_action_name(shift_down, m_button_down);
-        activate_internal_undo_redo_stack(true);
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), action_name);
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), action_name, UndoRedo::SnapshotType::GizmoAction);
         update_model_object();
 
         m_button_down = Button::None;
@@ -461,7 +703,72 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     return false;
 }
 
+bool GLGizmoPainterBase::on_mouse(const wxMouseEvent &mouse_event)
+{
+    // wxCoord == int --> wx/types.h
+    Vec2i mouse_coord(mouse_event.GetX(), mouse_event.GetY());
+    Vec2d mouse_pos = mouse_coord.cast<double>();
 
+    if (mouse_event.Moving()) {
+        gizmo_event(SLAGizmoEventType::Moving, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false);
+        return false;
+    }
+
+    // when control is down we allow scene pan and rotation even when clicking
+    // over some object
+    bool control_down           = mouse_event.CmdDown();
+    bool grabber_contains_mouse = (get_hover_id() != -1);
+
+    const Selection &selection = m_parent.get_selection();
+    int selected_object_idx = selection.get_object_idx();
+    if (mouse_event.LeftDown()) {
+        if ((!control_down || grabber_contains_mouse) &&            
+            gizmo_event(SLAGizmoEventType::LeftDown, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false))
+            // the gizmo got the event and took some action, there is no need
+            // to do anything more
+            return true;
+    } else if (mouse_event.RightDown()){
+        if (!control_down && selected_object_idx != -1 &&
+            gizmo_event(SLAGizmoEventType::RightDown, mouse_pos, false, false, false)) 
+            // event was taken care of
+            return true;
+    } else if (mouse_event.Dragging()) {
+        if (m_parent.get_move_volume_id() != -1)
+            // don't allow dragging objects with the Sla gizmo on
+            return true;
+        if (!control_down && gizmo_event(SLAGizmoEventType::Dragging,
+                                         mouse_pos, mouse_event.ShiftDown(),
+                                         mouse_event.AltDown(), false)) {
+            // the gizmo got the event and took some action, no need to do
+            // anything more here
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if(control_down && (mouse_event.LeftIsDown() || mouse_event.RightIsDown()))
+        {
+            // CTRL has been pressed while already dragging -> stop current action
+            if (mouse_event.LeftIsDown())
+                gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), true);
+            else if (mouse_event.RightIsDown())
+                gizmo_event(SLAGizmoEventType::RightUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), true);
+            return false;
+        }
+    } else if (mouse_event.LeftUp()) {
+        if (!m_parent.is_mouse_dragging()) {
+            // in case SLA/FDM gizmo is selected, we just pass the LeftUp
+            // event and stop processing - neither object moving or selecting
+            // is suppressed in that case
+            gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), control_down);
+            return true;
+        }
+    } else if (mouse_event.RightUp()) {
+        if (!m_parent.is_mouse_dragging()) {
+            gizmo_event(SLAGizmoEventType::RightUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), control_down);
+            return true;
+        }
+    }
+    return false;
+}
 
 void GLGizmoPainterBase::update_raycast_cache(const Vec2d& mouse_position,
                                               const Camera& camera,
@@ -547,16 +854,10 @@ void GLGizmoPainterBase::on_set_state()
 
     if (m_state == On && m_old_state != On) { // the gizmo was just turned on
         on_opening();
-        if (! m_parent.get_gizmos_manager().is_serializing()) {
-            wxGetApp().CallAfter([this]() {
-                activate_internal_undo_redo_stack(true);
-            });
-        }
     }
     if (m_state == Off && m_old_state != Off) { // the gizmo was just turned Off
         // we are actually shutting down
         on_shutdown();
-        activate_internal_undo_redo_stack(false);
         m_old_mo_id = -1;
         //m_iva.release_geometry();
         m_triangle_selectors.clear();
@@ -576,12 +877,38 @@ void GLGizmoPainterBase::on_load(cereal::BinaryInputArchive&)
     m_schedule_update = true;
 }
 
+TriangleSelector::ClippingPlane GLGizmoPainterBase::get_clipping_plane_in_volume_coordinates(const Transform3d &trafo) const {
+    const ::Slic3r::GUI::ClippingPlane *const clipping_plane = m_c->object_clipper()->get_clipping_plane();
+    if (clipping_plane == nullptr || !clipping_plane->is_active())
+        return {};
 
+    const Vec3d  clp_normal = clipping_plane->get_normal();
+    const double clp_offset = clipping_plane->get_offset();
 
-void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
+    const Transform3d trafo_normal = Transform3d(trafo.linear().transpose());
+    const Transform3d trafo_inv    = trafo.inverse();
+
+    Vec3d point_on_plane             = clp_normal * clp_offset;
+    Vec3d point_on_plane_transformed = trafo_inv * point_on_plane;
+    Vec3d normal_transformed         = trafo_normal * clp_normal;
+    auto offset_transformed          = float(point_on_plane_transformed.dot(normal_transformed));
+
+    return TriangleSelector::ClippingPlane({float(normal_transformed.x()), float(normal_transformed.y()), float(normal_transformed.z()), offset_transformed});
+}
+
+ColorRGBA TriangleSelectorGUI::get_seed_fill_color(const ColorRGBA& base_color)
 {
-    static constexpr std::array<float, 4> enforcers_color{0.47f, 0.47f, 1.f, 1.f};
-    static constexpr std::array<float, 4> blockers_color{1.f, 0.44f, 0.44f, 1.f};
+    return saturate(base_color, 0.75f);
+}
+
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+void TriangleSelectorGUI::render(ImGuiWrapper* imgui, const Transform3d& matrix)
+#else
+void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+{
+    static const ColorRGBA enforcers_color = { 0.47f, 0.47f, 1.0f, 1.0f };
+    static const ColorRGBA blockers_color  = { 1.0f, 0.44f, 0.44f, 1.0f };
 
     if (m_update_render_data) {
         update_render_data();
@@ -591,59 +918,240 @@ void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
     auto* shader = wxGetApp().get_current_shader();
     if (! shader)
         return;
+
     assert(shader->get_name() == "gouraud");
 
     for (auto iva : {std::make_pair(&m_iva_enforcers, enforcers_color),
                      std::make_pair(&m_iva_blockers, blockers_color)}) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        iva.first->set_color(iva.second);
+        iva.first->render();
+#else
         if (iva.first->has_VBOs()) {
             shader->set_uniform("uniform_color", iva.second);
             iva.first->render();
         }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    for (auto& iva : m_iva_seed_fills) {
+        size_t           color_idx = &iva - &m_iva_seed_fills.front();
+        const ColorRGBA& color     = TriangleSelectorGUI::get_seed_fill_color(color_idx == 1 ? enforcers_color :
+            color_idx == 2 ? blockers_color :
+            GLVolume::NEUTRAL_COLOR);
+        iva.set_color(color);
+        iva.render();
+    }
+#else
+    for (auto& iva : m_iva_seed_fills)
+        if (iva.has_VBOs()) {
+            size_t                      color_idx = &iva - &m_iva_seed_fills.front();
+            const ColorRGBA& color                = TriangleSelectorGUI::get_seed_fill_color(color_idx == 1 ? enforcers_color :
+                                                                                             color_idx == 2 ? blockers_color :
+                                                                                                              GLVolume::NEUTRAL_COLOR);
+            shader->set_uniform("uniform_color", color);
+            iva.render();
+        }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    render_paint_contour(matrix);
+#else
+    render_paint_contour();
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+#else
+    if (m_paint_contour.has_VBO()) {
+        ScopeGuard guard_gouraud([shader]() { shader->start_using(); });
+        shader->stop_using();
+
+        auto *contour_shader = wxGetApp().get_shader("mm_contour");
+        contour_shader->start_using();
+        contour_shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
+        m_paint_contour.render();
+        contour_shader->stop_using();
+    }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 #ifdef PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
     if (imgui)
         render_debug(imgui);
     else
         assert(false); // If you want debug output, pass ptr to ImGuiWrapper.
-#endif
+#endif // PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
 }
-
-
 
 void TriangleSelectorGUI::update_render_data()
 {
-    int enf_cnt = 0;
-    int blc_cnt = 0;
+    int              enf_cnt = 0;
+    int              blc_cnt = 0;
+    std::vector<int> seed_fill_cnt(m_iva_seed_fills.size(), 0);
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    for (auto* iva : { &m_iva_enforcers, &m_iva_blockers }) {
+        iva->reset();
+    }
+
+    for (auto& iva : m_iva_seed_fills) {
+        iva.reset();
+    }
+
+    GLModel::Geometry iva_enforcers_data;
+    iva_enforcers_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    GLModel::Geometry iva_blockers_data;
+    iva_blockers_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    std::array<GLModel::Geometry, 3> iva_seed_fills_data;
+    for (auto& data : iva_seed_fills_data)
+        data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+#else
     for (auto *iva : {&m_iva_enforcers, &m_iva_blockers})
         iva->release_geometry();
 
+    for (auto &iva : m_iva_seed_fills)
+        iva.release_geometry();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
+    // small value used to offset triangles along their normal to avoid z-fighting
+    static const float offset = 0.001f;
+
     for (const Triangle &tr : m_triangles) {
-        if (!tr.valid() || tr.is_split() || tr.get_state() == EnforcerBlockerType::NONE)
+        if (!tr.valid() || tr.is_split() || (tr.get_state() == EnforcerBlockerType::NONE && !tr.is_selected_by_seed_fill()))
             continue;
 
-        GLIndexedVertexArray &iva = tr.get_state() == EnforcerBlockerType::ENFORCER ? m_iva_enforcers : m_iva_blockers;
-        int &                 cnt = tr.get_state() == EnforcerBlockerType::ENFORCER ? enf_cnt : blc_cnt;
+        int tr_state = int(tr.get_state());
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        GLModel::Geometry &iva = tr.is_selected_by_seed_fill()                   ? iva_seed_fills_data[tr_state] :
+                                 tr.get_state() == EnforcerBlockerType::ENFORCER ? iva_enforcers_data :
+                                                                                   iva_blockers_data;
+#else
+        GLIndexedVertexArray &iva = tr.is_selected_by_seed_fill()                   ? m_iva_seed_fills[tr_state] :
+                                    tr.get_state() == EnforcerBlockerType::ENFORCER ? m_iva_enforcers :
+                                                                                      m_iva_blockers;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+        int                  &cnt = tr.is_selected_by_seed_fill()                   ? seed_fill_cnt[tr_state] :
+                                    tr.get_state() == EnforcerBlockerType::ENFORCER ? enf_cnt :
+                                                                                      blc_cnt;
         const Vec3f          &v0  = m_vertices[tr.verts_idxs[0]].v;
         const Vec3f          &v1  = m_vertices[tr.verts_idxs[1]].v;
         const Vec3f          &v2  = m_vertices[tr.verts_idxs[2]].v;
-        //FIXME the normal may likely be pulled from m_triangle_selectors, but it may not be worth the effort 
+        //FIXME the normal may likely be pulled from m_triangle_selectors, but it may not be worth the effort
         // or the current implementation may be more cache friendly.
         const Vec3f           n   = (v1 - v0).cross(v2 - v1).normalized();
-        iva.push_geometry(v0, n);
-        iva.push_geometry(v1, n);
-        iva.push_geometry(v2, n);
+        // small value used to offset triangles along their normal to avoid z-fighting
+        const Vec3f    offset_n   = offset * n;
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        iva.add_vertex(v0 + offset_n, n);
+        iva.add_vertex(v1 + offset_n, n);
+        iva.add_vertex(v2 + offset_n, n);
+        iva.add_triangle((unsigned int)cnt, (unsigned int)cnt + 1, (unsigned int)cnt + 2);
+#else
+        iva.push_geometry(v0 + offset_n, n);
+        iva.push_geometry(v1 + offset_n, n);
+        iva.push_geometry(v2 + offset_n, n);
         iva.push_triangle(cnt, cnt + 1, cnt + 2);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         cnt += 3;
     }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    if (!iva_enforcers_data.is_empty())
+        m_iva_enforcers.init_from(std::move(iva_enforcers_data));
+    if (!iva_blockers_data.is_empty())
+        m_iva_blockers.init_from(std::move(iva_blockers_data));
+    for (size_t i = 0; i < m_iva_seed_fills.size(); ++i) {
+        if (!iva_seed_fills_data[i].is_empty())
+            m_iva_seed_fills[i].init_from(std::move(iva_seed_fills_data[i]));
+    }
+
+    update_paint_contour();
+#else
     for (auto *iva : {&m_iva_enforcers, &m_iva_blockers})
         iva->finalize_geometry(true);
+
+    for (auto &iva : m_iva_seed_fills)
+        iva.finalize_geometry(true);
+
+    m_paint_contour.release_geometry();
+    std::vector<Vec2i> contour_edges = this->get_seed_fill_contour();
+    m_paint_contour.contour_vertices.reserve(contour_edges.size() * 6);
+    for (const Vec2i &edge : contour_edges) {
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.x());
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.y());
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.z());
+
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.x());
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.y());
+        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.z());
+    }
+
+    m_paint_contour.contour_indices.assign(m_paint_contour.contour_vertices.size() / 3, 0);
+    std::iota(m_paint_contour.contour_indices.begin(), m_paint_contour.contour_indices.end(), 0);
+    m_paint_contour.contour_indices_size = m_paint_contour.contour_indices.size();
+
+    m_paint_contour.finalize_geometry();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+void GLPaintContour::render() const
+{
+    assert(this->m_contour_VBO_id != 0);
+    assert(this->m_contour_EBO_id != 0);
 
+    glsafe(::glLineWidth(4.0f));
+
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->m_contour_VBO_id));
+    glsafe(::glVertexPointer(3, GL_FLOAT, 3 * sizeof(float), nullptr));
+
+    glsafe(::glEnableClientState(GL_VERTEX_ARRAY));
+
+    if (this->contour_indices_size > 0) {
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_contour_EBO_id));
+        glsafe(::glDrawElements(GL_LINES, GLsizei(this->contour_indices_size), GL_UNSIGNED_INT, nullptr));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+    }
+
+    glsafe(::glDisableClientState(GL_VERTEX_ARRAY));
+
+    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+}
+
+void GLPaintContour::finalize_geometry()
+{
+    assert(this->m_contour_VBO_id == 0);
+    assert(this->m_contour_EBO_id == 0);
+
+    if (!this->contour_vertices.empty()) {
+        glsafe(::glGenBuffers(1, &this->m_contour_VBO_id));
+        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->m_contour_VBO_id));
+        glsafe(::glBufferData(GL_ARRAY_BUFFER, this->contour_vertices.size() * sizeof(float), this->contour_vertices.data(), GL_STATIC_DRAW));
+        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
+        this->contour_vertices.clear();
+    }
+
+    if (!this->contour_indices.empty()) {
+        glsafe(::glGenBuffers(1, &this->m_contour_EBO_id));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_contour_EBO_id));
+        glsafe(::glBufferData(GL_ELEMENT_ARRAY_BUFFER, this->contour_indices.size() * sizeof(unsigned int), this->contour_indices.data(), GL_STATIC_DRAW));
+        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+        this->contour_indices.clear();
+    }
+}
+
+void GLPaintContour::release_geometry()
+{
+    if (this->m_contour_VBO_id) {
+        glsafe(::glDeleteBuffers(1, &this->m_contour_VBO_id));
+        this->m_contour_VBO_id = 0;
+    }
+    if (this->m_contour_EBO_id) {
+        glsafe(::glDeleteBuffers(1, &this->m_contour_EBO_id));
+        this->m_contour_EBO_id = 0;
+    }
+    this->clear();
+}
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 #ifdef PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
 void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
@@ -680,45 +1188,117 @@ void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
         INVALID
     };
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    for (auto& va : m_varrays)
+        va.reset();
+#else
     for (auto& va : m_varrays)
         va.release_geometry();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     std::array<int, 3> cnts;
 
     ::glScalef(1.01f, 1.01f, 1.01f);
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    std::array<GLModel::Geometry, 3> varrays_data;
+    for (auto& data : varrays_data)
+        data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3, GLModel::Geometry::EIndexType::UINT };
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
     for (int tr_id=0; tr_id<int(m_triangles.size()); ++tr_id) {
         const Triangle& tr = m_triangles[tr_id];
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        GLModel::Geometry* va = nullptr;
+#else
         GLIndexedVertexArray* va = nullptr;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         int* cnt = nullptr;
         if (tr_id < m_orig_size_indices) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            va = &varrays_data[ORIGINAL];
+#else
             va = &m_varrays[ORIGINAL];
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[ORIGINAL];
         }
         else if (tr.valid()) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            va = &varrays_data[SPLIT];
+#else
             va = &m_varrays[SPLIT];
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[SPLIT];
         }
         else {
             if (! m_show_invalid)
                 continue;
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            va = &varrays_data[INVALID];
+#else
             va = &m_varrays[INVALID];
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[INVALID];
         }
 
-        for (int i=0; i<3; ++i)
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        for (int i = 0; i < 3; ++i) {
+            va->add_vertex(m_vertices[tr.verts_idxs[i]].v, Vec3f(0.0f, 0.0f, 1.0f));
+        }
+        va->add_uint_triangle((unsigned int)*cnt, (unsigned int)*cnt + 1, (unsigned int)*cnt + 2);
+#else
+        for (int i = 0; i < 3; ++i)
             va->push_geometry(double(m_vertices[tr.verts_idxs[i]].v[0]),
                               double(m_vertices[tr.verts_idxs[i]].v[1]),
                               double(m_vertices[tr.verts_idxs[i]].v[2]),
                               0., 0., 1.);
         va->push_triangle(*cnt,
-                          *cnt+1,
-                          *cnt+2);
+            *cnt + 1,
+            *cnt + 2);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         *cnt += 3;
     }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    for (int i = 0; i < 3; ++i) {
+        if (!varrays_data[i].is_empty())
+            m_varrays[i].init_from(std::move(varrays_data[i]));
+    }
+#else
+//    for (auto* iva : { &m_iva_enforcers, &m_iva_blockers })
+//        iva->finalize_geometry(true);
+//
+//    for (auto& iva : m_iva_seed_fills)
+//        iva.finalize_geometry(true);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GLShaderProgram* curr_shader = wxGetApp().get_current_shader();
+    if (curr_shader != nullptr)
+        curr_shader->stop_using();
+
+    GLShaderProgram* shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
+
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
     ::glPolygonMode( GL_FRONT_AND_BACK, GL_LINE );
     for (vtype i : {ORIGINAL, SPLIT, INVALID}) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        GLModel& va = m_varrays[i];
+        switch (i) {
+        case ORIGINAL: va.set_color({ 0.0f, 0.0f, 1.0f, 1.0f }); break;
+        case SPLIT:    va.set_color({ 1.0f, 0.0f, 0.0f, 1.0f }); break;
+        case INVALID:  va.set_color({ 1.0f, 1.0f, 0.0f, 1.0f }); break;
+        }
+        va.render();
+#else
         GLIndexedVertexArray& va = m_varrays[i];
         va.finalize_geometry(true);
         if (va.has_VBOs()) {
@@ -729,11 +1309,75 @@ void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
             }
             va.render();
         }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
     ::glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        shader->stop_using();
+    }
+
+    if (curr_shader != nullptr)
+        curr_shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
-#endif
+#endif // PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void TriangleSelectorGUI::update_paint_contour()
+{
+    m_paint_contour.reset();
 
+    GLModel::Geometry init_data;
+    const std::vector<Vec2i> contour_edges = this->get_seed_fill_contour();
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    init_data.reserve_vertices(2 * contour_edges.size());
+    init_data.reserve_indices(2 * contour_edges.size());
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    init_data.color = ColorRGBA::WHITE();
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+// 
+    // vertices + indices
+    unsigned int vertices_count = 0;
+    for (const Vec2i& edge : contour_edges) {
+        init_data.add_vertex(m_vertices[edge(0)].v);
+        init_data.add_vertex(m_vertices[edge(1)].v);
+        vertices_count += 2;
+        init_data.add_line(vertices_count - 2, vertices_count - 1);
+    }
+
+    if (!init_data.is_empty())
+        m_paint_contour.init_from(std::move(init_data));
+}
+
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+void TriangleSelectorGUI::render_paint_contour(const Transform3d& matrix)
+#else
+void TriangleSelectorGUI::render_paint_contour()
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+{
+    auto* curr_shader = wxGetApp().get_current_shader();
+    if (curr_shader != nullptr)
+        curr_shader->stop_using();
+
+    auto* contour_shader = wxGetApp().get_shader("mm_contour");
+    if (contour_shader != nullptr) {
+        contour_shader->start_using();
+
+        contour_shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        contour_shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
+        contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+
+        m_paint_contour.render();
+        contour_shader->stop_using();
+    }
+
+    if (curr_shader != nullptr)
+        curr_shader->start_using();
+}
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 } // namespace Slic3r::GUI

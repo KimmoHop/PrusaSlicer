@@ -16,6 +16,7 @@
 namespace Slic3r {
 
 class BoundingBox;
+class BoundingBoxf;
 class Line;
 class MultiPoint;
 class Point;
@@ -26,6 +27,9 @@ template<int N, int M, class T>
 using Mat = Eigen::Matrix<T, N, M, Eigen::DontAlign, N, M>;
 
 template<int N, class T> using Vec = Mat<N, 1, T>;
+
+template<typename NumberType>
+using DynVec = Eigen::Matrix<NumberType, Eigen::Dynamic, 1>;
 
 // Eigen types, to replace the Slic3r's own types in the future.
 // Vector types with a fixed point coordinate base type.
@@ -75,24 +79,35 @@ inline const auto &identity3d = identity<3, double>;
 
 inline bool operator<(const Vec2d &lhs, const Vec2d &rhs) { return lhs.x() < rhs.x() || (lhs.x() == rhs.x() && lhs.y() < rhs.y()); }
 
-template<int Options>
-int32_t cross2(const Eigen::MatrixBase<Eigen::Matrix<int32_t, 2, 1, Options>> &v1, const Eigen::MatrixBase<Eigen::Matrix<int32_t, 2, 1, Options>> &v2) = delete;
-
-template<typename T, int Options>
-inline T cross2(const Eigen::MatrixBase<Eigen::Matrix<T, 2, 1, Options>> &v1, const Eigen::MatrixBase<Eigen::Matrix<T, 2, 1, Options>> &v2)
-{
-    return v1.x() * v2.y() - v1.y() * v2.x();
-}
-
+// Cross product of two 2D vectors.
+// None of the vectors may be of int32_t type as the result would overflow.
 template<typename Derived, typename Derived2>
 inline typename Derived::Scalar cross2(const Eigen::MatrixBase<Derived> &v1, const Eigen::MatrixBase<Derived2> &v2)
 {
+    static_assert(Derived::IsVectorAtCompileTime && int(Derived::SizeAtCompileTime) == 2, "cross2(): first parameter is not a 2D vector");
+    static_assert(Derived2::IsVectorAtCompileTime && int(Derived2::SizeAtCompileTime) == 2, "cross2(): first parameter is not a 2D vector");
+    static_assert(! std::is_same<typename Derived::Scalar, int32_t>::value, "cross2(): Scalar type must not be int32_t, otherwise the cross product would overflow.");
     static_assert(std::is_same<typename Derived::Scalar, typename Derived2::Scalar>::value, "cross2(): Scalar types of 1st and 2nd operand must be equal.");
     return v1.x() * v2.y() - v1.y() * v2.x();
 }
 
-template<typename T, int Options>
-inline Eigen::Matrix<T, 2, 1, Eigen::DontAlign> perp(const Eigen::MatrixBase<Eigen::Matrix<T, 2, 1, Options>> &v) { return Eigen::Matrix<T, 2, 1, Eigen::DontAlign>(- v.y(), v.x()); }
+// 2D vector perpendicular to the argument.
+template<typename Derived>
+inline Eigen::Matrix<typename Derived::Scalar, 2, 1, Eigen::DontAlign> perp(const Eigen::MatrixBase<Derived> &v)
+{ 
+    static_assert(Derived::IsVectorAtCompileTime && int(Derived::SizeAtCompileTime) == 2, "perp(): parameter is not a 2D vector");
+    return { - v.y(), v.x() };
+}
+
+// Angle from v1 to v2, returning double atan2(y, x) normalized to <-PI, PI>.
+template<typename Derived, typename Derived2>
+inline double angle(const Eigen::MatrixBase<Derived> &v1, const Eigen::MatrixBase<Derived2> &v2) {
+    static_assert(Derived::IsVectorAtCompileTime && int(Derived::SizeAtCompileTime) == 2, "angle(): first parameter is not a 2D vector");
+    static_assert(Derived2::IsVectorAtCompileTime && int(Derived2::SizeAtCompileTime) == 2, "angle(): second parameter is not a 2D vector");
+    auto v1d = v1.template cast<double>();
+    auto v2d = v2.template cast<double>();
+    return atan2(cross2(v1d, v2d), v1d.dot(v2d));
+}
 
 template<class T, int N, int Options>
 Eigen::Matrix<T, 2, 1, Eigen::DontAlign> to_2d(const Eigen::MatrixBase<Eigen::Matrix<T, N, 1, Options>> &ptN) { return { ptN.x(), ptN.y() }; }
@@ -133,6 +148,7 @@ public:
     Point(const Eigen::MatrixBase<OtherDerived> &other) : Vec2crd(other) {}
     static Point new_scale(coordf_t x, coordf_t y) { return Point(coord_t(scale_(x)), coord_t(scale_(y))); }
     static Point new_scale(const Vec2d &v) { return Point(coord_t(scale_(v.x())), coord_t(scale_(v.y()))); }
+    static Point new_scale(const Vec2f &v) { return Point(coord_t(scale_(v.x())), coord_t(scale_(v.y()))); }
 
     // This method allows you to assign Eigen expressions to MyVectorType
     template<typename OtherDerived>
@@ -163,9 +179,6 @@ public:
     int    nearest_point_index(const PointConstPtrs &points) const;
     int    nearest_point_index(const PointPtrs &points) const;
     bool   nearest_point(const Points &points, Point* point) const;
-    double ccw(const Point &p1, const Point &p2) const;
-    double ccw(const Line &line) const;
-    double ccw_angle(const Point &p1, const Point &p2) const;
     Point  projection_onto(const MultiPoint &poly) const;
     Point  projection_onto(const Line &line) const;
 };
@@ -173,6 +186,11 @@ public:
 inline bool operator<(const Point &l, const Point &r) 
 { 
     return l.x() < r.x() || (l.x() == r.x() && l.y() < r.y());
+}
+
+inline Point operator* (const Point& l, const double &r)
+{
+    return {coord_t(l.x() * r), coord_t(l.y() * r)};
 }
 
 inline bool is_approx(const Point &p1, const Point &p2, coord_t epsilon = coord_t(SCALED_EPSILON))
@@ -213,6 +231,7 @@ inline Point lerp(const Point &a, const Point &b, double t)
 
 BoundingBox get_extents(const Points &pts);
 BoundingBox get_extents(const std::vector<Points> &pts);
+BoundingBoxf get_extents(const std::vector<Vec2d> &pts);
 
 // Test for duplicate points in a vector of points.
 // The points are copied, sorted and checked for duplicates globally.
@@ -252,7 +271,7 @@ namespace int128 {
 // To be used by std::unordered_map, std::unordered_multimap and friends.
 struct PointHash {
     size_t operator()(const Vec2crd &pt) const {
-        return std::hash<coord_t>()(pt.x()) ^ std::hash<coord_t>()(pt.y());
+        return coord_t((89 * 31 + int64_t(pt.x())) * 31 + pt.y());
     }
 };
 

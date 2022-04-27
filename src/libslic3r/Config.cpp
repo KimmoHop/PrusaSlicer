@@ -73,7 +73,7 @@ std::string escape_strings_cstyle(const std::vector<std::string> &strs)
         bool should_quote = strs.size() == 1 && str.empty();
         for (size_t i = 0; i < str.size(); ++ i) {
             char c = str[i];
-            if (c == ' ' || c == '\t' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
+            if (c == ' ' || c == ';' || c == '\t' || c == '\\' || c == '"' || c == '\r' || c == '\n') {
                 should_quote = true;
                 break;
             }
@@ -306,7 +306,7 @@ ConfigOptionDef* ConfigDef::add_nullable(const t_config_option_key &opt_key, Con
 std::ostream& ConfigDef::print_cli_help(std::ostream& out, bool show_defaults, std::function<bool(const ConfigOptionDef &)> filter) const
 {
     // prepare a function for wrapping text
-    auto wrap = [](std::string text, size_t line_length) -> std::string {
+    auto wrap = [](const std::string& text, size_t line_length) -> std::string {
         std::istringstream words(text);
         std::ostringstream wrapped;
         std::string word;
@@ -335,7 +335,7 @@ std::ostream& ConfigDef::print_cli_help(std::ostream& out, bool show_defaults, s
             categories.insert(def.category);
     }
     
-    for (auto category : categories) {
+    for (const std::string& category : categories) {
         if (category != "") {
             out << category << ":" << std::endl;
         } else if (categories.size() > 1) {
@@ -740,7 +740,7 @@ ConfigSubstitutions ConfigBase::load(const boost::property_tree::ptree &tree, Fo
 }
 
 // Load the config keys from the given string.
-static inline size_t load_from_gcode_string_legacy(ConfigBase &config, const char *str, ConfigSubstitutionContext &substitutions)
+size_t ConfigBase::load_from_gcode_string_legacy(ConfigBase& config, const char* str, ConfigSubstitutionContext& substitutions)
 {
     if (str == nullptr)
         return 0;

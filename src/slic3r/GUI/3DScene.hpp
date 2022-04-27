@@ -7,13 +7,17 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/Color.hpp"
 
 #include "GLModel.hpp"
 
 #include <functional>
 #include <optional>
 
+#ifndef NDEBUG
 #define HAS_GLSAFE
+#endif // NDEBUG
+
 #ifdef HAS_GLSAFE
     extern void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char *function_name);
     inline void glAssertRecentCall() { glAssertRecentCallImpl(__FILE__, __LINE__, __FUNCTION__); }
@@ -28,6 +32,7 @@
 namespace Slic3r {
 class SLAPrintObject;
 enum  SLAPrintObjectStep : unsigned int;
+class BuildVolume;
 class DynamicPrintConfig;
 class ExtrusionPath;
 class ExtrusionMultiPath;
@@ -39,9 +44,9 @@ class ModelVolume;
 enum ModelInstanceEPrintVolumeState : unsigned char;
 
 // Return appropriate color based on the ModelVolume.
-std::array<float, 4> color_from_model_volume(const ModelVolume& model_volume);
+extern ColorRGBA color_from_model_volume(const ModelVolume& model_volume);
 
-
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
 // A container for interleaved arrays of 3D vertices and normals,
 // possibly indexed by triangles and / or quads.
 class GLIndexedVertexArray {
@@ -242,19 +247,20 @@ public:
 private:
     BoundingBox m_bounding_box;
 };
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 class GLVolume {
 public:
-    static const std::array<float, 4> SELECTED_COLOR;
-    static const std::array<float, 4> HOVER_SELECT_COLOR;
-    static const std::array<float, 4> HOVER_DESELECT_COLOR;
-    static const std::array<float, 4> OUTSIDE_COLOR;
-    static const std::array<float, 4> SELECTED_OUTSIDE_COLOR;
-    static const std::array<float, 4> DISABLED_COLOR;
-    static const std::array<float, 4> SLA_SUPPORT_COLOR;
-    static const std::array<float, 4> SLA_PAD_COLOR;
-    static const std::array<float, 4> NEUTRAL_COLOR;
-    static const std::array<std::array<float, 4>, 4> MODEL_COLOR;
+    static const ColorRGBA SELECTED_COLOR;
+    static const ColorRGBA HOVER_SELECT_COLOR;
+    static const ColorRGBA HOVER_DESELECT_COLOR;
+    static const ColorRGBA OUTSIDE_COLOR;
+    static const ColorRGBA SELECTED_OUTSIDE_COLOR;
+    static const ColorRGBA DISABLED_COLOR;
+    static const ColorRGBA SLA_SUPPORT_COLOR;
+    static const ColorRGBA SLA_PAD_COLOR;
+    static const ColorRGBA NEUTRAL_COLOR;
+    static const std::array<ColorRGBA, 4> MODEL_COLOR;
 
     enum EHoverState : unsigned char
     {
@@ -264,8 +270,8 @@ public:
         HS_Deselect
     };
 
-    GLVolume(float r = 1.f, float g = 1.f, float b = 1.f, float a = 1.f);
-    GLVolume(const std::array<float, 4>& rgba) : GLVolume(rgba[0], rgba[1], rgba[2], rgba[3]) {}
+    GLVolume(float r = 1.0f, float g = 1.0f, float b = 1.0f, float a = 1.0f);
+    GLVolume(const ColorRGBA& color) : GLVolume(color.r(), color.g(), color.b(), color.a()) {}
 
 private:
     Geometry::Transformation m_instance_transformation;
@@ -279,6 +285,8 @@ private:
     std::shared_ptr<const TriangleMesh> m_convex_hull;
     // Bounding box of this volume, in unscaled coordinates.
     std::optional<BoundingBoxf3> m_transformed_convex_hull_bounding_box;
+    // Bounding box of the non sinking part of this volume, in unscaled coordinates.
+    std::optional<BoundingBoxf3> m_transformed_non_sinking_bounding_box;
 
     class SinkingContours
     {
@@ -298,11 +306,30 @@ private:
 
     SinkingContours m_sinking_contours;
 
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+    class NonManifoldEdges
+    {
+        GLVolume& m_parent;
+        GUI::GLModel m_model;
+        bool m_update_needed{ true };
+
+    public:
+        NonManifoldEdges(GLVolume& volume) : m_parent(volume) {}
+        void render();
+        void set_as_dirty() { m_update_needed = true; }
+
+    private:
+        void update();
+    };
+
+    NonManifoldEdges m_non_manifold_edges;
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
+
 public:
     // Color of the triangles / quads held by this volume.
-    std::array<float, 4> color;
+    ColorRGBA color;
     // Color used to render this volume.
-    std::array<float, 4> render_color;
+    ColorRGBA render_color;
 
     struct CompositeID {
         CompositeID(int object_id, int volume_id, int instance_id) : object_id(object_id), volume_id(volume_id), instance_id(instance_id) {}
@@ -352,9 +379,7 @@ public:
 	    bool                is_wipe_tower : 1;
 	    // Wheter or not this volume has been generated from an extrusion path
 	    bool                is_extrusion_path : 1;
-	    // Wheter or not to always render this volume using its own alpha 
-	    bool                force_transparent : 1;
-	    // Whether or not always use the volume's own color (not using SELECTED/HOVER/DISABLED/OUTSIDE)
+        // Whether or not always use the volume's own color (not using SELECTED/HOVER/DISABLED/OUTSIDE)
 	    bool                force_native_color : 1;
         // Whether or not render this volume in neutral
         bool                force_neutral_color : 1;
@@ -365,11 +390,17 @@ public:
     // Is mouse or rectangle selection over this object to select/deselect it ?
     EHoverState         	hover;
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GUI::GLModel            model;
+#else
     // Interleaved triangles & normals with indexed triangles & quads.
     GLIndexedVertexArray        indexed_vertex_array;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     // Ranges of triangle and quad indices to be rendered.
     std::pair<size_t, size_t>   tverts_range;
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
     std::pair<size_t, size_t>   qverts_range;
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
     // If the qverts or tverts contain thick extrusions, then offsets keeps pointers of the starts
     // of the extrusions per layer.
@@ -379,20 +410,23 @@ public:
 
     // Bounding box of this volume, in unscaled coordinates.
     BoundingBoxf3 bounding_box() const { 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        return this->model.get_bounding_box();
+#else
         BoundingBoxf3 out;
-        if (! this->indexed_vertex_array.bounding_box().isEmpty()) {
+        if (!this->indexed_vertex_array.bounding_box().isEmpty()) {
             out.min = this->indexed_vertex_array.bounding_box().min().cast<double>();
             out.max = this->indexed_vertex_array.bounding_box().max().cast<double>();
             out.defined = true;
-        };
+        }
         return out;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
 
-    void set_color(const std::array<float, 4>& rgba);
-    void set_render_color(float r, float g, float b, float a);
-    void set_render_color(const std::array<float, 4>& rgba);
+    void set_color(const ColorRGBA& rgba)        { color = rgba; }
+    void set_render_color(const ColorRGBA& rgba) { render_color = rgba; }
     // Sets render color in dependence of current state
-    void set_render_color();
+    void set_render_color(bool force_transparent);
     // set color according to model volume
     void set_color_from_model_volume(const ModelVolume& model_volume);
 
@@ -457,8 +491,8 @@ public:
     void set_convex_hull(const TriangleMesh &convex_hull) { m_convex_hull = std::make_shared<const TriangleMesh>(convex_hull); }
     void set_convex_hull(TriangleMesh &&convex_hull) { m_convex_hull = std::make_shared<const TriangleMesh>(std::move(convex_hull)); }
 
-    int                 object_idx() const { return this->composite_id.object_id; }
-    int                 volume_idx() const { return this->composite_id.volume_id; }
+    int                 object_idx() const   { return this->composite_id.object_id; }
+    int                 volume_idx() const   { return this->composite_id.volume_id; }
     int                 instance_idx() const { return this->composite_id.instance_id; }
 
     Transform3d         world_matrix() const;
@@ -469,19 +503,33 @@ public:
     BoundingBoxf3        transformed_convex_hull_bounding_box(const Transform3d &trafo) const;
     // caching variant
     const BoundingBoxf3& transformed_convex_hull_bounding_box() const;
+    // non-caching variant
+    BoundingBoxf3        transformed_non_sinking_bounding_box(const Transform3d& trafo) const;
+    // caching variant
+    const BoundingBoxf3& transformed_non_sinking_bounding_box() const;
     // convex hull
     const TriangleMesh*  convex_hull() const { return m_convex_hull.get(); }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    bool                empty() const { return this->model.is_empty(); }
+#else
     bool                empty() const { return this->indexed_vertex_array.empty(); }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     void                set_range(double low, double high);
 
-    void                render() const;
+    void                render();
 
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
     void                finalize_geometry(bool opengl_initialized) { this->indexed_vertex_array.finalize_geometry(opengl_initialized); }
     void                release_geometry() { this->indexed_vertex_array.release_geometry(); }
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
-    void                set_bounding_boxes_as_dirty() { m_transformed_bounding_box.reset(); m_transformed_convex_hull_bounding_box.reset(); }
+    void                set_bounding_boxes_as_dirty() {
+        m_transformed_bounding_box.reset();
+        m_transformed_convex_hull_bounding_box.reset();
+        m_transformed_non_sinking_bounding_box.reset();
+    }
 
     bool                is_sla_support() const;
     bool                is_sla_pad() const;
@@ -489,14 +537,25 @@ public:
     bool                is_sinking() const;
     bool                is_below_printbed() const;
     void                render_sinking_contours();
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+    void                render_non_manifold_edges();
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
     // Return an estimate of the memory consumed by this class.
-    size_t 				cpu_memory_used() const { 
-    	//FIXME what to do wih m_convex_hull?
+    size_t 				cpu_memory_used() const {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        return sizeof(*this) + this->model.cpu_memory_used() + this->print_zs.capacity() * sizeof(coordf_t) +
+               this->offsets.capacity() * sizeof(size_t);
+    }
+    // Return an estimate of the memory held by GPU vertex buffers.
+    size_t 				gpu_memory_used() const { return this->model.gpu_memory_used(); }
+#else
+        //FIXME what to do wih m_convex_hull?
     	return sizeof(*this) - sizeof(this->indexed_vertex_array) + this->indexed_vertex_array.cpu_memory_used() + this->print_zs.capacity() * sizeof(coordf_t) + this->offsets.capacity() * sizeof(size_t);
     }
     // Return an estimate of the memory held by GPU vertex buffers.
     size_t 				gpu_memory_used() const { return this->indexed_vertex_array.gpu_memory_used(); }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     size_t 				total_memory_used() const { return this->cpu_memory_used() + this->gpu_memory_used(); }
 };
 
@@ -514,16 +573,28 @@ public:
         All
     };
 
+    struct PrintVolume
+    {
+        // see: Bed3D::EShapeType
+        int type{ 0 };
+        // data contains:
+        // Rectangle:
+        //   [0] = min.x, [1] = min.y, [2] = max.x, [3] = max.y
+        // Circle:
+        //   [0] = center.x, [1] = center.y, [3] = radius
+        std::array<float, 4> data;
+        //   [0] = min z, [1] = max z
+        std::array<float, 2> zs;
+    };
+
 private:
-    // min and max vertex of the print box volume
-    float m_print_box_min[3];
-    float m_print_box_max[3];
+    PrintVolume m_print_volume;
 
     // z range for clipping in shaders
-    float m_z_range[2];
+    std::array<float, 2> m_z_range;
 
     // plane coeffs for clipping in shaders
-    float m_clipping_plane[4];
+    std::array<double, 4> m_clipping_plane;
 
     struct Slope
     {
@@ -533,7 +604,10 @@ private:
     };
 
     Slope m_slope;
-    bool m_show_sinking_contours = false;
+    bool m_show_sinking_contours{ false };
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+    bool m_show_non_manifold_edges{ true };
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
 public:
     GLVolumePtrs volumes;
@@ -541,11 +615,40 @@ public:
     GLVolumeCollection() { set_default_slope_normal_z(); }
     ~GLVolumeCollection() { clear(); }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    std::vector<int> load_object(
+        const ModelObject* model_object,
+        int                      obj_idx,
+        const std::vector<int>& instance_idxs);
+
+    int load_object_volume(
+        const ModelObject* model_object,
+        int                obj_idx,
+        int                volume_idx,
+        int                instance_idx);
+
+    // Load SLA auxiliary GLVolumes (for support trees or pad).
+    void load_object_auxiliary(
+        const SLAPrintObject* print_object,
+        int                             obj_idx,
+        // pairs of <instance_idx, print_instance_idx>
+        const std::vector<std::pair<size_t, size_t>>& instances,
+        SLAPrintObjectStep              milestone,
+        // Timestamp of the last change of the milestone
+        size_t                          timestamp);
+
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+    int load_wipe_tower_preview(
+        float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width);
+#else
+    int load_wipe_tower_preview(
+        int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width);
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+#else
     std::vector<int> load_object(
         const ModelObject 		*model_object,
         int                      obj_idx,
         const std::vector<int>	&instance_idxs,
-        const std::string 		&color_by,
         bool 					 opengl_initialized);
 
     int load_object_volume(
@@ -553,7 +656,6 @@ public:
         int                obj_idx,
         int                volume_idx,
         int                instance_idx,
-        const std::string &color_by,
         bool 			   opengl_initialized);
 
     // Load SLA auxiliary GLVolumes (for support trees or pad).
@@ -567,15 +669,32 @@ public:
         size_t                          timestamp,
         bool 			   				opengl_initialized);
 
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+    int load_wipe_tower_preview(
+        float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width, bool opengl_initialized);
+#else
     int load_wipe_tower_preview(
         int obj_idx, float pos_x, float pos_y, float width, float depth, float height, float rotation_angle, bool size_unknown, float brim_width, bool opengl_initialized);
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-    GLVolume* new_toolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats = 0);
-    GLVolume* new_nontoolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats = 0);
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GLVolume* new_toolpath_volume(const ColorRGBA& rgba);
+    GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba);
+#else
+    GLVolume* new_toolpath_volume(const ColorRGBA& rgba, size_t reserve_vbo_floats = 0);
+    GLVolume* new_nontoolpath_volume(const ColorRGBA& rgba, size_t reserve_vbo_floats = 0);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     // Render the volumes by OpenGL.
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    void render(ERenderType type, bool disable_cullface, const Transform3d& view_matrix, const Transform3d& projection_matrix,
+        std::function<bool(const GLVolume&)> filter_func = std::function<bool(const GLVolume&)>()) const;
+#else
     void render(ERenderType type, bool disable_cullface, const Transform3d& view_matrix, std::function<bool(const GLVolume&)> filter_func = std::function<bool(const GLVolume&)>()) const;
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
     // Finalize the initialization of the geometry & indices,
     // upload the geometry and indices to OpenGL VBO objects
     // and shrink the allocated data, possibly relasing it if it has been loaded into the VBOs.
@@ -583,19 +702,20 @@ public:
     // Release the geometry data assigned to the volumes.
     // If OpenGL VBOs were allocated, an OpenGL context has to be active to release them.
     void release_geometry() { for (auto *v : volumes) v->release_geometry(); }
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
     // Clear the geometry
     void clear() { for (auto *v : volumes) delete v; volumes.clear(); }
 
     bool empty() const { return volumes.empty(); }
-    void set_range(double low, double high) { for (GLVolume *vol : this->volumes) vol->set_range(low, high); }
+    void set_range(double low, double high) { for (GLVolume* vol : this->volumes) vol->set_range(low, high); }
 
-    void set_print_box(float min_x, float min_y, float min_z, float max_x, float max_y, float max_z) {
-        m_print_box_min[0] = min_x; m_print_box_min[1] = min_y; m_print_box_min[2] = min_z;
-        m_print_box_max[0] = max_x; m_print_box_max[1] = max_y; m_print_box_max[2] = max_z;
-    }
+    void set_print_volume(const PrintVolume& print_volume) { m_print_volume = print_volume; }
 
     void set_z_range(float min_z, float max_z) { m_z_range[0] = min_z; m_z_range[1] = max_z; }
-    void set_clipping_plane(const double* coeffs) { m_clipping_plane[0] = coeffs[0]; m_clipping_plane[1] = coeffs[1]; m_clipping_plane[2] = coeffs[2]; m_clipping_plane[3] = coeffs[3]; }
+    void set_clipping_plane(const std::array<double, 4>& coeffs) { m_clipping_plane = coeffs; }
+
+    const std::array<float, 2>& get_z_range() const { return m_z_range; }
+    const std::array<double, 4>& get_clipping_plane() const { return m_clipping_plane; }
 
     bool is_slope_active() const { return m_slope.active; }
     void set_slope_active(bool active) { m_slope.active = active; }
@@ -604,10 +724,13 @@ public:
     void set_slope_normal_z(float normal_z) { m_slope.normal_z = normal_z; }
     void set_default_slope_normal_z() { m_slope.normal_z = -::cos(Geometry::deg2rad(90.0f - 45.0f)); }
     void set_show_sinking_contours(bool show) { m_show_sinking_contours = show; }
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+    void set_show_non_manifold_edges(bool show) { m_show_non_manifold_edges = show; }
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
     // returns true if all the volumes are completely contained in the print volume
     // returns the containment state in the given out_state, if non-null
-    bool check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state) const;
+    bool check_outside_state(const Slic3r::BuildVolume& build_volume, ModelInstanceEPrintVolumeState* out_state) const;
     void reset_outside_state();
 
     void update_colors_by_extruder(const DynamicPrintConfig* config);
@@ -632,9 +755,18 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs& volumes, GLVolumeCo
 
 struct _3DScene
 {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    static void thick_lines_to_verts(const Lines& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, double top_z, GUI::GLModel::Geometry& geometry);
+    static void thick_lines_to_verts(const Lines3& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, GUI::GLModel::Geometry& geometry);
+    static void extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+    static void extrusionentity_to_verts(const ExtrusionLoop& extrusion_loop, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+    static void extrusionentity_to_verts(const ExtrusionMultiPath& extrusion_multi_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+    static void extrusionentity_to_verts(const ExtrusionEntityCollection& extrusion_entity_collection, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+    static void extrusionentity_to_verts(const ExtrusionEntity* extrusion_entity, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry);
+#else
     static void thick_lines_to_verts(const Lines& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, double top_z, GLVolume& volume);
     static void thick_lines_to_verts(const Lines3& lines, const std::vector<double>& widths, const std::vector<double>& heights, bool closed, GLVolume& volume);
-	static void extrusionentity_to_verts(const Polyline &polyline, float width, float height, float print_z, GLVolume& volume);
+    static void extrusionentity_to_verts(const Polyline& polyline, float width, float height, float print_z, GLVolume& volume);
     static void extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, GLVolume& volume);
     static void extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, const Point& copy, GLVolume& volume);
     static void extrusionentity_to_verts(const ExtrusionLoop& extrusion_loop, float print_z, const Point& copy, GLVolume& volume);
@@ -643,9 +775,8 @@ struct _3DScene
     static void extrusionentity_to_verts(const ExtrusionEntity* extrusion_entity, float print_z, const Point& copy, GLVolume& volume);
     static void polyline3_to_verts(const Polyline3& polyline, double width, double height, GLVolume& volume);
     static void point3_to_verts(const Vec3crd& point, double width, double height, GLVolume& volume);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 };
-
-static constexpr float BedEpsilon = 3.f * float(EPSILON);
 
 }
 

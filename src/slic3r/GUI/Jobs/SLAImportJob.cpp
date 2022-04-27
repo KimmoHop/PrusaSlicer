@@ -1,112 +1,20 @@
 #include "SLAImportJob.hpp"
 
+#include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Format/SL1.hpp"
+#include "libslic3r/Format/SLAArchiveReader.hpp"
 
 #include "slic3r/GUI/GUI.hpp"
-#include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GUI_ObjectList.hpp"
+#include "slic3r/GUI/NotificationManager.hpp"
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 
-#include <wx/dialog.h>
-#include <wx/stattext.h>
-#include <wx/combobox.h>
 #include <wx/filename.h>
-#include <wx/filepicker.h>
 
 namespace Slic3r { namespace GUI {
-
-enum class Sel { modelAndProfile, profileOnly, modelOnly};
-
-class ImportDlg: public wxDialog {
-    wxFilePickerCtrl *m_filepicker;
-    wxComboBox *m_import_dropdown, *m_quality_dropdown;
-
-public:
-    ImportDlg(Plater *plater)
-        : wxDialog{plater, wxID_ANY, "Import SLA archive"}
-    {
-        auto szvert = new wxBoxSizer{wxVERTICAL};
-        auto szfilepck = new wxBoxSizer{wxHORIZONTAL};
-
-        m_filepicker = new wxFilePickerCtrl(this, wxID_ANY,
-                                            from_u8(wxGetApp().app_config->get_last_dir()), _(L("Choose SLA archive:")),
-                                            "SL1 / SL1S archive files (*.sl1, *.sl1s, *.zip)|*.sl1;*.SL1;*.sl1s;*.SL1S;*.zip;*.ZIP",
-                                            wxDefaultPosition, wxDefaultSize, wxFLP_DEFAULT_STYLE | wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-
-        szfilepck->Add(new wxStaticText(this, wxID_ANY, _L("Import file") + ": "), 0, wxALIGN_CENTER);
-        szfilepck->Add(m_filepicker, 1);
-        szvert->Add(szfilepck, 0, wxALL | wxEXPAND, 5);
-
-        auto szchoices = new wxBoxSizer{wxHORIZONTAL};
-
-        static const std::vector<wxString> inp_choices = {
-            _(L("Import model and profile")),
-            _(L("Import profile only")),
-            _(L("Import model only"))
-        };
-
-        m_import_dropdown = new wxComboBox(
-            this, wxID_ANY, inp_choices[0], wxDefaultPosition, wxDefaultSize,
-            inp_choices.size(), inp_choices.data(), wxCB_READONLY | wxCB_DROPDOWN);
-
-        szchoices->Add(m_import_dropdown);
-        szchoices->Add(new wxStaticText(this, wxID_ANY, _L("Quality") + ": "), 0, wxALIGN_CENTER | wxALL, 5);
-
-        static const std::vector<wxString> qual_choices = {
-            _(L("Accurate")),
-            _(L("Balanced")),
-            _(L("Quick"))
-        };
-
-        m_quality_dropdown = new wxComboBox(
-            this, wxID_ANY, qual_choices[0], wxDefaultPosition, wxDefaultSize,
-            qual_choices.size(), qual_choices.data(), wxCB_READONLY | wxCB_DROPDOWN);
-        szchoices->Add(m_quality_dropdown);
-
-        m_import_dropdown->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &) {
-            if (get_selection() == Sel::profileOnly)
-                m_quality_dropdown->Disable();
-            else m_quality_dropdown->Enable();
-        });
-
-        szvert->Add(szchoices, 0, wxALL, 5);
-        szvert->AddStretchSpacer(1);
-        auto szbtn = new wxBoxSizer(wxHORIZONTAL);
-        szbtn->Add(new wxButton{this, wxID_CANCEL});
-        szbtn->Add(new wxButton{this, wxID_OK});
-        szvert->Add(szbtn, 0, wxALIGN_RIGHT | wxALL, 5);
-
-        SetSizerAndFit(szvert);
-    }
-
-    Sel get_selection() const
-    {
-        int sel = m_import_dropdown->GetSelection();
-        return Sel(std::min(int(Sel::modelOnly), std::max(0, sel)));
-    }
-
-    Vec2i get_marchsq_windowsize() const
-    {
-        enum { Accurate, Balanced, Fast};
-
-        switch(m_quality_dropdown->GetSelection())
-        {
-        case Fast: return {8, 8};
-        case Balanced: return {4, 4};
-        default:
-        case Accurate:
-            return {2, 2};
-        }
-    }
-
-    wxString get_path() const
-    {
-        return m_filepicker->GetPath();
-    }
-};
 
 class SLAImportJob::priv {
 public:
@@ -117,57 +25,74 @@ public:
     indexed_triangle_set mesh;
     DynamicPrintConfig   profile;
     wxString             path;
-    Vec2i                win = {2, 2};
+    Quality              quality = Quality::Balanced;
     std::string          err;
     ConfigSubstitutions config_substitutions;
 
-    priv(Plater *plt) : plater{plt} {}
+    const SLAImportJobView * import_dlg;
+
+    priv(Plater *plt, const SLAImportJobView *view) : plater{plt}, import_dlg{view} {}
 };
 
-SLAImportJob::SLAImportJob(std::shared_ptr<ProgressIndicator> pri, Plater *plater)
-    : PlaterJob{std::move(pri), plater}, p{std::make_unique<priv>(plater)}
-{}
+SLAImportJob::SLAImportJob(const SLAImportJobView *view)
+    : p{std::make_unique<priv>(wxGetApp().plater(), view)}
+{
+    prepare();
+}
 
 SLAImportJob::~SLAImportJob() = default;
 
-void SLAImportJob::process()
+void SLAImportJob::process(Ctl &ctl)
 {
-    auto progr = [this](int s) {
+    auto statustxt = _u8L("Importing SLA archive");
+    ctl.update_status(0, statustxt);
+
+    auto progr = [&ctl, &statustxt](int s) {
         if (s < 100)
-            update_status(int(s), _(L("Importing SLA archive")));
-        return !was_canceled();
+            ctl.update_status(int(s), statustxt);
+        return !ctl.was_canceled();
     };
 
     if (p->path.empty()) return;
 
     std::string path = p->path.ToUTF8().data();
+    std::string format_id = p->import_dlg->get_archive_format();
+
     try {
         switch (p->sel) {
         case Sel::modelAndProfile:
-            p->config_substitutions = import_sla_archive(path, p->win, p->mesh, p->profile, progr);
-            break;
         case Sel::modelOnly:
-            p->config_substitutions = import_sla_archive(path, p->win, p->mesh, progr);
+            p->config_substitutions = import_sla_archive(path,
+                                                         format_id,
+                                                         p->mesh,
+                                                         p->profile,
+                                                         p->quality, progr);
             break;
         case Sel::profileOnly:
-            p->config_substitutions = import_sla_archive(path, p->profile);
+            p->config_substitutions = import_sla_archive(path, format_id,
+                                                         p->profile);
             break;
         }
-
-    } catch (std::exception &ex) {
+    } catch (MissingProfileError &) {
+        p->err = _u8L("The SLA archive doesn't contain any presets. "
+                      "Please activate some SLA printer preset first before "
+                      "importing that SLA archive.");
+    } catch (ReaderUnimplementedError &) {
+        p->err = _u8L("Import is unavailable for this archive format.");
+    }catch (std::exception &ex) {
         p->err = ex.what();
     }
 
-    update_status(100, was_canceled() ? _(L("Importing canceled.")) :
-                                        _(L("Importing done.")));
+    ctl.update_status(100, ctl.was_canceled() ? _u8L("Importing canceled.") :
+                                                _u8L("Importing done."));
 }
 
 void SLAImportJob::reset()
 {
     p->sel     = Sel::modelAndProfile;
     p->mesh    = {};
-    p->profile = {};
-    p->win     = {2, 2};
+    p->profile = p->plater->sla_print().full_print_config();
+    p->quality = SLAImportQuality::Balanced;
     p->path.Clear();
 }
 
@@ -175,24 +100,20 @@ void SLAImportJob::prepare()
 {
     reset();
 
-    ImportDlg dlg{p->plater};
+    auto path  = p->import_dlg->get_path();
+    auto nm    = wxFileName(path);
+    p->path    = !nm.Exists(wxFILE_EXISTS_REGULAR) ? "" : nm.GetFullPath();
+    p->sel     = p->import_dlg->get_selection();
+    p->quality = p->import_dlg->get_quality();
 
-    if (dlg.ShowModal() == wxID_OK) {
-        auto path = dlg.get_path();
-        auto nm = wxFileName(path);
-        p->path = !nm.Exists(wxFILE_EXISTS_REGULAR) ? "" : nm.GetFullPath();
-        p->sel  = dlg.get_selection();
-        p->win  = dlg.get_marchsq_windowsize();
-        p->config_substitutions.clear();
-    } else {
-        p->path = "";
-    }
+    p->config_substitutions.clear();
 }
 
-void SLAImportJob::finalize()
+void SLAImportJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
     // Ignore the arrange result if aborted.
-    if (was_canceled()) return;
+    if (canceled || eptr)
+        return;
 
     if (!p->err.empty()) {
         show_error(p->plater, p->err);
@@ -202,7 +123,18 @@ void SLAImportJob::finalize()
 
     std::string name = wxFileName(p->path).GetName().ToUTF8().data();
 
-    if (!p->profile.empty()) {
+    if (p->profile.empty()) {
+        p->plater->get_notification_manager()->push_notification(
+        NotificationType::CustomNotification,
+        NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("The imported SLA archive did not contain any presets. "
+               "The current SLA presets were used as fallback."));
+    }
+
+    if (p->sel != Sel::modelOnly) {
+        if (p->profile.empty())
+            p->profile = p->plater->sla_print().full_print_config();
+
         const ModelObjectPtrs& objects = p->plater->model().objects;
         for (auto object : objects)
             if (object->volumes.size() > 1)
@@ -218,14 +150,27 @@ void SLAImportJob::finalize()
         config.apply(SLAFullPrintConfig::defaults());
         config += std::move(p->profile);
 
-        wxGetApp().preset_bundle->load_config_model(name, std::move(config));
-        wxGetApp().load_current_presets();
+        if (Preset::printer_technology(config) == ptSLA) {
+            wxGetApp().preset_bundle->load_config_model(name, std::move(config));
+            p->plater->check_selected_presets_visibility(ptSLA);
+            wxGetApp().load_current_presets();
+        } else {
+            p->plater->get_notification_manager()->push_notification(
+                NotificationType::CustomNotification,
+                NotificationManager::NotificationLevel::WarningNotificationLevel,
+                _u8L("The profile in the imported archive is corrupt and will not be loaded."));
+        }
     }
 
     if (!p->mesh.empty()) {
         bool is_centered = false;
-        p->plater->sidebar().obj_list()->load_mesh_object(TriangleMesh{p->mesh},
+        p->plater->sidebar().obj_list()->load_mesh_object(TriangleMesh{std::move(p->mesh)},
                                                           name, is_centered);
+    } else if (p->sel == Sel::modelOnly || p->sel == Sel::modelAndProfile) {
+        p->plater->get_notification_manager()->push_notification(
+            NotificationType::CustomNotification,
+            NotificationManager::NotificationLevel::WarningNotificationLevel,
+            _u8L("No object could be retrieved from the archive. The slices might be corrupted or missing."));
     }
 
     if (! p->config_substitutions.empty())

@@ -1,29 +1,36 @@
 #include <GL/glew.h>
 
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
 #if ENABLE_SMOOTH_NORMALS
 #include <igl/per_face_normals.h>
 #include <igl/per_corner_normals.h>
 #include <igl/per_vertex_normals.h>
 #endif // ENABLE_SMOOTH_NORMALS
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 #include "3DScene.hpp"
 #include "GLShader.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
+#include "BitmapCache.hpp"
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+#include "Camera.hpp"
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
+#include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Slicing.hpp"
-#include "slic3r/GUI/BitmapCache.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Tesselate.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,18 +74,14 @@ void glAssertRecentCallImpl(const char* file_name, unsigned int line, const char
 
 namespace Slic3r {
 
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
 #if ENABLE_SMOOTH_NORMALS
 static void smooth_normals_corner(TriangleMesh& mesh, std::vector<stl_normal>& normals)
 {
-    mesh.repair();
-
     using MapMatrixXfUnaligned = Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
     using MapMatrixXiUnaligned = Eigen::Map<const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
 
-    std::vector<stl_normal> face_normals(mesh.stl.stats.number_of_facets);
-    for (uint32_t i = 0; i < mesh.stl.stats.number_of_facets; ++i) {
-        face_normals[i] = mesh.stl.facet_start[i].normal;
-    }
+    std::vector<Vec3f> face_normals = its_face_normals(mesh.its);
 
     Eigen::MatrixXd vertices = MapMatrixXfUnaligned(mesh.its.vertices.front().data(),
         Eigen::Index(mesh.its.vertices.size()), 3).cast<double>();
@@ -100,8 +103,6 @@ static void smooth_normals_corner(TriangleMesh& mesh, std::vector<stl_normal>& n
 
 static void smooth_normals_vertex(TriangleMesh& mesh, std::vector<stl_normal>& normals)
 {
-    mesh.repair();
-
     using MapMatrixXfUnaligned = Eigen::Map<const Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
     using MapMatrixXiUnaligned = Eigen::Map<const Eigen::Matrix<int, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor | Eigen::DontAlign>>;
 
@@ -261,6 +262,10 @@ void GLIndexedVertexArray::render(
     const std::pair<size_t, size_t>& tverts_range,
     const std::pair<size_t, size_t>& qverts_range) const
 {
+    // this method has been called before calling finalize() ?
+    if (this->vertices_and_normals_interleaved_VBO_id == 0 && !this->vertices_and_normals_interleaved.empty())
+        return;
+
     assert(this->vertices_and_normals_interleaved_VBO_id != 0);
     assert(this->triangle_indices_VBO_id != 0 || this->quad_indices_VBO_id != 0);
 
@@ -288,6 +293,7 @@ void GLIndexedVertexArray::render(
     
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
 }
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 const float GLVolume::SinkingContours::HalfWidth = 0.25f;
 
@@ -295,18 +301,30 @@ void GLVolume::SinkingContours::render()
 {
     update();
 
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
+    if (shader == nullptr)
+        return;
+
+    const GUI::Camera& camera = GUI::wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * Geometry::assemble_transform(m_shift));
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#else
     glsafe(::glPushMatrix());
     glsafe(::glTranslated(m_shift.x(), m_shift.y(), m_shift.z()));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
     m_model.render();
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
     glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 }
 
 void GLVolume::SinkingContours::update()
 {
-    int object_idx = m_parent.object_idx();
-    Model& model = GUI::wxGetApp().plater()->model();
+    const int object_idx = m_parent.object_idx();
+    const Model& model = GUI::wxGetApp().plater()->model();
 
-    if (0 <= object_idx && object_idx < (int)model.objects.size() && m_parent.is_sinking() && !m_parent.is_below_printbed()) {
+    if (0 <= object_idx && object_idx < int(model.objects.size()) && m_parent.is_sinking() && !m_parent.is_below_printbed()) {
         const BoundingBoxf3& box = m_parent.transformed_convex_hull_bounding_box();
         if (!m_old_box.size().isApprox(box.size()) || m_old_box.min.z() != box.min.z()) {
             m_old_box = box;
@@ -315,28 +333,37 @@ void GLVolume::SinkingContours::update()
             const TriangleMesh& mesh = model.objects[object_idx]->volumes[m_parent.volume_idx()]->mesh();
 
             m_model.reset();
-            GUI::GLModel::InitializationData init_data;
+            GUI::GLModel::Geometry init_data;
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            init_data.format = { GUI::GLModel::Geometry::EPrimitiveType::Triangles, GUI::GLModel::Geometry::EVertexLayout::P3 };
+            init_data.color = ColorRGBA::WHITE();
+            unsigned int vertices_counter = 0;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             MeshSlicingParams slicing_params;
             slicing_params.trafo = m_parent.world_matrix();
-            Polygons polygons = union_(slice_mesh(mesh.its, 0.0f, slicing_params));
-            for (Polygon& polygon : polygons) {
-                if (polygon.is_clockwise())
-                    polygon.reverse();
-                Polygons outer_polys = offset(polygon, float(scale_(HalfWidth)));
-                assert(outer_polys.size() == 1);
-                if (outer_polys.empty())
-                    // no outer contour, skip
-                    continue;
-
-                ExPolygon expoly(std::move(outer_polys.front()));
-                expoly.holes = offset(polygon, -float(scale_(HalfWidth)));
-                polygons_reverse(expoly.holes);
-
-                GUI::GLModel::InitializationData::Entity entity;
-                entity.type = GUI::GLModel::PrimitiveType::Triangles;
+            const Polygons polygons = union_(slice_mesh(mesh.its, 0.0f, slicing_params));
+            for (const ExPolygon& expoly : diff_ex(expand(polygons, float(scale_(HalfWidth))), shrink(polygons, float(scale_(HalfWidth))))) {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
                 const std::vector<Vec3d> triangulation = triangulate_expolygon_3d(expoly);
+                init_data.reserve_vertices(init_data.vertices_count() + triangulation.size());
+                init_data.reserve_indices(init_data.indices_count() + triangulation.size());
                 for (const Vec3d& v : triangulation) {
-                    entity.positions.emplace_back(v.cast<float>() + Vec3f(0.0f, 0.0f, 0.015f)); // add a small positive z to avoid z-fighting
+                    init_data.add_vertex((Vec3f)(v.cast<float>() + 0.015f * Vec3f::UnitZ())); // add a small positive z to avoid z-fighting
+                    ++vertices_counter;
+                    if (vertices_counter % 3 == 0)
+                        init_data.add_triangle(vertices_counter - 3, vertices_counter - 2, vertices_counter - 1);
+                }
+            }
+            m_model.init_from(std::move(init_data));
+#else
+                GUI::GLModel::Geometry::Entity entity;
+                entity.type = GUI::GLModel::EPrimitiveType::Triangles;
+                const std::vector<Vec3d> triangulation = triangulate_expolygon_3d(expoly);
+                entity.positions.reserve(entity.positions.size() + triangulation.size());
+                entity.normals.reserve(entity.normals.size() + triangulation.size());
+                entity.indices.reserve(entity.indices.size() + triangulation.size() / 3);
+                for (const Vec3d& v : triangulation) {
+                    entity.positions.emplace_back(v.cast<float>() + 0.015f * Vec3f::UnitZ()); // add a small positive z to avoid z-fighting
                     entity.normals.emplace_back(Vec3f::UnitZ());
                     const size_t positions_count = entity.positions.size();
                     if (positions_count % 3 == 0) {
@@ -347,8 +374,8 @@ void GLVolume::SinkingContours::update()
                 }
                 init_data.entities.emplace_back(entity);
             }
-
             m_model.init_from(init_data);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         }
         else
             m_shift = box.center() - m_old_box.center();
@@ -357,25 +384,115 @@ void GLVolume::SinkingContours::update()
         m_model.reset();
 }
 
-const std::array<float, 4> GLVolume::SELECTED_COLOR = { 0.0f, 1.0f, 0.0f, 1.0f };
-const std::array<float, 4> GLVolume::HOVER_SELECT_COLOR = { 0.4f, 0.9f, 0.1f, 1.0f };
-const std::array<float, 4> GLVolume::HOVER_DESELECT_COLOR = { 1.0f, 0.75f, 0.75f, 1.0f };
-const std::array<float, 4> GLVolume::OUTSIDE_COLOR = { 0.0f, 0.38f, 0.8f, 1.0f };
-const std::array<float, 4> GLVolume::SELECTED_OUTSIDE_COLOR = { 0.19f, 0.58f, 1.0f, 1.0f };
-const std::array<float, 4> GLVolume::DISABLED_COLOR = { 0.25f, 0.25f, 0.25f, 1.0f };
-const std::array<float, 4> GLVolume::SLA_SUPPORT_COLOR = { 0.75f, 0.75f, 0.75f, 1.0f };
-const std::array<float, 4> GLVolume::SLA_PAD_COLOR = { 0.0f, 0.2f, 0.0f, 1.0f };
-const std::array<float, 4> GLVolume::NEUTRAL_COLOR = { 0.9f, 0.9f, 0.9f, 1.0f };
-const std::array<std::array<float, 4>, 4> GLVolume::MODEL_COLOR = { {
-    { 1.0f, 1.0f, 0.0f, 1.f },
-    { 1.0f, 0.5f, 0.5f, 1.f },
-    { 0.5f, 1.0f, 0.5f, 1.f },
-    { 0.5f, 0.5f, 1.0f, 1.f }
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+void GLVolume::NonManifoldEdges::render()
+{
+    update();
+
+    glsafe(::glLineWidth(2.0f));
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
+    if (shader == nullptr)
+        return;
+
+    const GUI::Camera& camera = GUI::wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_parent.world_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+#else
+    glsafe(::glPushMatrix());
+    glsafe(::glMultMatrixd(m_parent.world_matrix().data()));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    m_model.set_color(complementary(m_parent.render_color));
+#else
+    m_model.set_color(-1, complementary(m_parent.render_color));
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+    m_model.render();
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+    glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+}
+
+void GLVolume::NonManifoldEdges::update()
+{
+    if (!m_update_needed)
+        return;
+
+    m_model.reset();
+    const int object_idx = m_parent.object_idx();
+    const Model& model = GUI::wxGetApp().plater()->model();
+    if (0 <= object_idx && object_idx < int(model.objects.size())) {
+        const ModelObject* model_object = model.objects[object_idx];
+        const int volume_idx = m_parent.volume_idx();
+        if (0 <= volume_idx && volume_idx < int(model_object->volumes.size())) {
+            const ModelVolume* model_volume = model_object->volumes[volume_idx];
+            const TriangleMesh& mesh = model_volume->mesh();
+            const std::vector<std::pair<int, int>> edges = its_get_open_edges(mesh.its);
+            if (!edges.empty()) {
+                GUI::GLModel::Geometry init_data;
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+                init_data.format = { GUI::GLModel::Geometry::EPrimitiveType::Lines, GUI::GLModel::Geometry::EVertexLayout::P3 };
+                init_data.reserve_vertices(2 * edges.size());
+                init_data.reserve_indices(2 * edges.size());
+
+                // vertices + indices
+                unsigned int vertices_count = 0;
+                for (const std::pair<int, int>& edge : edges) {
+                    init_data.add_vertex((Vec3f)mesh.its.vertices[edge.first].cast<float>());
+                    init_data.add_vertex((Vec3f)mesh.its.vertices[edge.second].cast<float>());
+                    vertices_count += 2;
+                    init_data.add_line(vertices_count - 2, vertices_count - 1);
+                }
+                m_model.init_from(std::move(init_data));
+#else
+                GUI::GLModel::Geometry::Entity entity;
+                entity.type = GUI::GLModel::EPrimitiveType::Lines;
+
+                entity.positions.reserve(2 * edges.size());
+                entity.normals.reserve(2 * edges.size());
+                entity.indices.reserve(2 * edges.size());
+                for (const std::pair<int, int>& edge : edges) {
+                    entity.positions.emplace_back(mesh.its.vertices[edge.first].cast<float>());
+                    entity.positions.emplace_back(mesh.its.vertices[edge.second].cast<float>());
+                    entity.normals.emplace_back(Vec3f::UnitZ());
+                    entity.normals.emplace_back(Vec3f::UnitZ());
+                    entity.indices.emplace_back(entity.positions.size() - 2);
+                    entity.indices.emplace_back(entity.positions.size() - 1);
+                }
+
+                init_data.entities.emplace_back(entity);
+                m_model.init_from(init_data);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+            }
+        }
+    }
+
+    m_update_needed = false;
+}
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
+
+const ColorRGBA GLVolume::SELECTED_COLOR         = ColorRGBA::GREEN();
+const ColorRGBA GLVolume::HOVER_SELECT_COLOR     = { 0.4f, 0.9f, 0.1f, 1.0f };
+const ColorRGBA GLVolume::HOVER_DESELECT_COLOR   = { 1.0f, 0.75f, 0.75f, 1.0f };
+const ColorRGBA GLVolume::OUTSIDE_COLOR          = { 0.0f, 0.38f, 0.8f, 1.0f };
+const ColorRGBA GLVolume::SELECTED_OUTSIDE_COLOR = { 0.19f, 0.58f, 1.0f, 1.0f };
+const ColorRGBA GLVolume::DISABLED_COLOR         = ColorRGBA::DARK_GRAY();
+const ColorRGBA GLVolume::SLA_SUPPORT_COLOR      = ColorRGBA::LIGHT_GRAY();
+const ColorRGBA GLVolume::SLA_PAD_COLOR          = { 0.0f, 0.2f, 0.0f, 1.0f };
+const ColorRGBA GLVolume::NEUTRAL_COLOR          = { 0.9f, 0.9f, 0.9f, 1.0f };
+const std::array<ColorRGBA, 4> GLVolume::MODEL_COLOR = { {
+    ColorRGBA::YELLOW(),
+    { 1.0f, 0.5f, 0.5f, 1.0f },
+    { 0.5f, 1.0f, 0.5f, 1.0f },
+    { 0.5f, 0.5f, 1.0f, 1.0f }
 } };
 
 GLVolume::GLVolume(float r, float g, float b, float a)
     : m_sla_shift_z(0.0)
     , m_sinking_contours(*this)
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+    , m_non_manifold_edges(*this)
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
     // geometry_id == 0 -> invalid
     , geometry_id(std::pair<size_t, size_t>(0, 0))
     , extruder_id(0)
@@ -390,33 +507,19 @@ GLVolume::GLVolume(float r, float g, float b, float a)
     , is_modifier(false)
     , is_wipe_tower(false)
     , is_extrusion_path(false)
-    , force_transparent(false)
     , force_native_color(false)
     , force_neutral_color(false)
     , force_sinking_contours(false)
     , tverts_range(0, size_t(-1))
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
     , qverts_range(0, size_t(-1))
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 {
     color = { r, g, b, a };
     set_render_color(color);
 }
 
-void GLVolume::set_color(const std::array<float, 4>& rgba)
-{
-    color = rgba;
-}
-
-void GLVolume::set_render_color(float r, float g, float b, float a)
-{
-    render_color = { r, g, b, a };
-}
-
-void GLVolume::set_render_color(const std::array<float, 4>& rgba)
-{
-    render_color = rgba;
-}
-
-void GLVolume::set_render_color()
+void GLVolume::set_render_color(bool force_transparent)
 {
     bool outside = is_outside || is_below_printbed();
 
@@ -445,40 +548,28 @@ void GLVolume::set_render_color()
             set_render_color(color);
     }
 
-    if (!printable) {
-        render_color[0] /= 4;
-        render_color[1] /= 4;
-        render_color[2] /= 4;
-    }
+    if (!printable)
+        render_color = saturate(render_color, 0.25f);
 
     if (force_transparent)
-        render_color[3] = color[3];
+        render_color.a(color.a());
 }
 
-std::array<float, 4> color_from_model_volume(const ModelVolume& model_volume)
+ColorRGBA color_from_model_volume(const ModelVolume& model_volume)
 {
-    std::array<float, 4> color;
-    if (model_volume.is_negative_volume()) {
-        color[0] = 0.2f;
-        color[1] = 0.2f;
-        color[2] = 0.2f;
-    }
-    else if (model_volume.is_modifier()) {
-        color[0] = 0.2f;
-        color[1] = 1.0f;
-        color[2] = 0.2f;
-    }
-    else if (model_volume.is_support_blocker()) {
-        color[0] = 1.0f;
-        color[1] = 0.2f;
-        color[2] = 0.2f;
-    }
-    else if (model_volume.is_support_enforcer()) {
-        color[0] = 0.2f;
-        color[1] = 0.2f;
-        color[2] = 1.0f;
-    }
-    color[3] = model_volume.is_model_part() ? 1.f : 0.5f;
+    ColorRGBA color;
+    if (model_volume.is_negative_volume())
+        color = { 0.2f, 0.2f, 0.2f, 1.0f };
+    else if (model_volume.is_modifier())
+        color = { 1.0, 1.0f, 0.2f, 1.0f };
+    else if (model_volume.is_support_blocker())
+        color = { 1.0f, 0.2f, 0.2f, 1.0f };
+    else if (model_volume.is_support_enforcer())
+        color = { 0.2f, 0.2f, 1.0f, 1.0f };
+
+    if (!model_volume.is_model_part())
+        color.a(0.5f);
+
     return color;
 }
 
@@ -523,6 +614,51 @@ BoundingBoxf3 GLVolume::transformed_convex_hull_bounding_box(const Transform3d &
         bounding_box().transformed(trafo);
 }
 
+BoundingBoxf3 GLVolume::transformed_non_sinking_bounding_box(const Transform3d& trafo) const
+{
+    return GUI::wxGetApp().plater()->model().objects[object_idx()]->volumes[volume_idx()]->mesh().transformed_bounding_box(trafo, 0.0);
+}
+
+const BoundingBoxf3& GLVolume::transformed_non_sinking_bounding_box() const
+{
+    if (!m_transformed_non_sinking_bounding_box.has_value()) {
+        std::optional<BoundingBoxf3>* trans_box = const_cast<std::optional<BoundingBoxf3>*>(&m_transformed_non_sinking_bounding_box);
+        const Transform3d& trafo = world_matrix();
+        *trans_box = transformed_non_sinking_bounding_box(trafo);
+    }
+    return *m_transformed_non_sinking_bounding_box;
+}
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void GLVolume::set_range(double min_z, double max_z)
+{
+    this->tverts_range.first = 0;
+    this->tverts_range.second = this->model.indices_count();
+
+    if (!this->print_zs.empty()) {
+        // The Z layer range is specified.
+        // First test whether the Z span of this object is not out of (min_z, max_z) completely.
+        if (this->print_zs.front() > max_z || this->print_zs.back() < min_z)
+            this->tverts_range.second = 0;
+        else {
+            // Then find the lowest layer to be displayed.
+            size_t i = 0;
+            for (; i < this->print_zs.size() && this->print_zs[i] < min_z; ++i);
+            if (i == this->print_zs.size())
+                // This shall not happen.
+                this->tverts_range.second = 0;
+            else {
+                // Remember start of the layer.
+                this->tverts_range.first = this->offsets[i];
+                // Some layers are above $min_z. Which?
+                for (; i < this->print_zs.size() && this->print_zs[i] <= max_z; ++i);
+                if (i < this->print_zs.size())
+                    this->tverts_range.second = this->offsets[i];
+            }
+        }
+    }
+}
+#else
 void GLVolume::set_range(double min_z, double max_z)
 {
     this->qverts_range.first = 0;
@@ -535,7 +671,8 @@ void GLVolume::set_range(double min_z, double max_z)
         if (this->print_zs.front() > max_z || this->print_zs.back() < min_z) {
             this->qverts_range.second = 0;
             this->tverts_range.second = 0;
-        } else {
+        }
+        else {
             // Then find the lowest layer to be displayed.
             size_t i = 0;
             for (; i < this->print_zs.size() && this->print_zs[i] < min_z; ++ i);
@@ -543,7 +680,8 @@ void GLVolume::set_range(double min_z, double max_z)
                 // This shall not happen.
                 this->qverts_range.second = 0;
                 this->tverts_range.second = 0;
-            } else {
+            }
+            else {
                 // Remember start of the layer.
                 this->qverts_range.first = this->offsets[i * 2];
                 this->tverts_range.first = this->offsets[i * 2 + 1];
@@ -557,21 +695,40 @@ void GLVolume::set_range(double min_z, double max_z)
         }
     }
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-void GLVolume::render() const
+void GLVolume::render()
 {
     if (!is_active)
         return;
 
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
+    if (shader == nullptr)
+        return;
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+
     if (this->is_left_handed())
         glFrontFace(GL_CW);
     glsafe(::glCullFace(GL_BACK));
-    glsafe(::glPushMatrix());
-    glsafe(::glMultMatrixd(world_matrix().data()));
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+        glsafe(::glPushMatrix());
+        glsafe(::glMultMatrixd(world_matrix().data()));
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    if (tverts_range == std::make_pair<size_t, size_t>(0, -1))
+        model.render();
+    else
+        model.render(this->tverts_range);
+#else
     this->indexed_vertex_array.render(this->tverts_range, this->qverts_range);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-    glsafe(::glPopMatrix());
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+        glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+
     if (this->is_left_handed())
         glFrontFace(GL_CCW);
 }
@@ -597,46 +754,75 @@ void GLVolume::render_sinking_contours()
     m_sinking_contours.render();
 }
 
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+void GLVolume::render_non_manifold_edges()
+{
+    m_non_manifold_edges.render();
+}
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+std::vector<int> GLVolumeCollection::load_object(
+    const ModelObject*      model_object,
+    int                     obj_idx,
+    const std::vector<int>& instance_idxs)
+#else
 std::vector<int> GLVolumeCollection::load_object(
     const ModelObject       *model_object,
     int                      obj_idx,
     const std::vector<int>  &instance_idxs,
-    const std::string       &color_by,
     bool 					 opengl_initialized)
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 {
     std::vector<int> volumes_idx;
     for (int volume_idx = 0; volume_idx < int(model_object->volumes.size()); ++volume_idx)
         for (int instance_idx : instance_idxs)
-            volumes_idx.emplace_back(this->GLVolumeCollection::load_object_volume(model_object, obj_idx, volume_idx, instance_idx, color_by, opengl_initialized));
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            volumes_idx.emplace_back(this->GLVolumeCollection::load_object_volume(model_object, obj_idx, volume_idx, instance_idx));
+#else
+            volumes_idx.emplace_back(this->GLVolumeCollection::load_object_volume(model_object, obj_idx, volume_idx, instance_idx, opengl_initialized));
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     return volumes_idx;
 }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+int GLVolumeCollection::load_object_volume(
+    const ModelObject* model_object,
+    int                  obj_idx,
+    int                  volume_idx,
+    int                  instance_idx)
+#else
 int GLVolumeCollection::load_object_volume(
     const ModelObject   *model_object,
     int                  obj_idx,
     int                  volume_idx,
     int                  instance_idx,
-    const std::string   &color_by,
     bool 				 opengl_initialized)
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 {
     const ModelVolume   *model_volume = model_object->volumes[volume_idx];
     const int            extruder_id  = model_volume->extruder_id();
     const ModelInstance *instance 	  = model_object->instances[instance_idx];
     const TriangleMesh  &mesh 		  = model_volume->mesh();
-    std::array<float, 4> color = GLVolume::MODEL_COLOR[((color_by == "volume") ? volume_idx : obj_idx) % 4];
-    color[3] = model_volume->is_model_part() ? 1.f : 0.5f;
-    this->volumes.emplace_back(new GLVolume(color));
+    this->volumes.emplace_back(new GLVolume());
     GLVolume& v = *this->volumes.back();
     v.set_color(color_from_model_volume(*model_volume));
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_SMOOTH_NORMALS
+    v.model.init_from(mesh, true);
+#else
+    v.model.init_from(mesh);
+#endif // ENABLE_SMOOTH_NORMALS
+#else
 #if ENABLE_SMOOTH_NORMALS
     v.indexed_vertex_array.load_mesh(mesh, true);
 #else
     v.indexed_vertex_array.load_mesh(mesh);
 #endif // ENABLE_SMOOTH_NORMALS
     v.indexed_vertex_array.finalize_geometry(opengl_initialized);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     v.composite_id = GLVolume::CompositeID(obj_idx, volume_idx, instance_idx);
-    if (model_volume->is_model_part())
-    {
+    if (model_volume->is_model_part()) {
         // GLVolume will reference a convex hull from model_volume!
         v.set_convex_hull(model_volume->get_convex_hull_shared_ptr());
         if (extruder_id != -1)
@@ -653,6 +839,16 @@ int GLVolumeCollection::load_object_volume(
 // Load SLA auxiliary GLVolumes (for support trees or pad).
 // This function produces volumes for multiple instances in a single shot,
 // as some object specific mesh conversions may be expensive.
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void GLVolumeCollection::load_object_auxiliary(
+    const SLAPrintObject* print_object,
+    int                             obj_idx,
+    // pairs of <instance_idx, print_instance_idx>
+    const std::vector<std::pair<size_t, size_t>>& instances,
+    SLAPrintObjectStep              milestone,
+    // Timestamp of the last change of the milestone
+    size_t                          timestamp)
+#else
 void GLVolumeCollection::load_object_auxiliary(
     const SLAPrintObject 		   *print_object,
     int                             obj_idx,
@@ -662,6 +858,7 @@ void GLVolumeCollection::load_object_auxiliary(
     // Timestamp of the last change of the milestone
     size_t                          timestamp,
     bool 				 			opengl_initialized)
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 {
     assert(print_object->is_step_done(milestone));
     Transform3d  mesh_trafo_inv = print_object->trafo().inverse();
@@ -674,12 +871,21 @@ void GLVolumeCollection::load_object_auxiliary(
         const ModelInstance& model_instance = *print_object->model_object()->instances[instance_idx.first];
         this->volumes.emplace_back(new GLVolume((milestone == slaposPad) ? GLVolume::SLA_PAD_COLOR : GLVolume::SLA_SUPPORT_COLOR));
         GLVolume& v = *this->volumes.back();
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_SMOOTH_NORMALS
+        v.model.init_from(mesh, true);
+#else
+        v.model.init_from(mesh);
+#endif // ENABLE_SMOOTH_NORMALS
+        v.model.set_color((milestone == slaposPad) ? GLVolume::SLA_PAD_COLOR : GLVolume::SLA_SUPPORT_COLOR);
+#else
 #if ENABLE_SMOOTH_NORMALS
         v.indexed_vertex_array.load_mesh(mesh, true);
 #else
         v.indexed_vertex_array.load_mesh(mesh);
 #endif // ENABLE_SMOOTH_NORMALS
         v.indexed_vertex_array.finalize_geometry(opengl_initialized);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         v.composite_id = GLVolume::CompositeID(obj_idx, -int(milestone), (int)instance_idx.first);
         v.geometry_id = std::pair<size_t, size_t>(timestamp, model_instance.id().id);
         // Create a copy of the convex hull mesh for each instance. Use a move operator on the last instance.
@@ -695,9 +901,27 @@ void GLVolumeCollection::load_object_auxiliary(
     }
 }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+int GLVolumeCollection::load_wipe_tower_preview(
+    float pos_x, float pos_y, float width, float depth, float height,
+    float rotation_angle, bool size_unknown, float brim_width)
+#else
+int GLVolumeCollection::load_wipe_tower_preview(
+    int obj_idx, float pos_x, float pos_y, float width, float depth, float height,
+    float rotation_angle, bool size_unknown, float brim_width)
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+#else
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+int GLVolumeCollection::load_wipe_tower_preview(
+    float pos_x, float pos_y, float width, float depth, float height,
+    float rotation_angle, bool size_unknown, float brim_width, bool opengl_initialized)
+#else
 int GLVolumeCollection::load_wipe_tower_preview(
     int obj_idx, float pos_x, float pos_y, float width, float depth, float height,
     float rotation_angle, bool size_unknown, float brim_width, bool opengl_initialized)
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 {
     if (depth < 0.01f)
         return int(this->volumes.size() - 1);
@@ -705,13 +929,13 @@ int GLVolumeCollection::load_wipe_tower_preview(
         height = 0.1f;
 
     TriangleMesh mesh;
-    std::array<float, 4> color = { 0.5f, 0.5f, 0.0f, 1.0f };
+    ColorRGBA color = ColorRGBA::DARK_YELLOW();
 
     // In case we don't know precise dimensions of the wipe tower yet, we'll draw
     // the box with different color with one side jagged:
     if (size_unknown) {
-        color[0] = 0.9f;
-        color[1] = 0.6f;
+        color.r(0.9f);
+        color.g(0.6f);
 
         // Too narrow tower would interfere with the teeth. The estimate is not precise anyway.
         depth = std::max(depth, 10.f);
@@ -754,11 +978,23 @@ int GLVolumeCollection::load_wipe_tower_preview(
 
     volumes.emplace_back(new GLVolume(color));
     GLVolume& v = *volumes.back();
-    v.indexed_vertex_array.load_mesh(mesh);    
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    v.model.init_from(mesh);
+    v.model.set_color(color);
+#else
+    v.indexed_vertex_array.load_mesh(mesh);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+    v.set_convex_hull(mesh.convex_hull_3d());
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
     v.indexed_vertex_array.finalize_geometry(opengl_initialized);
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
     v.set_volume_offset(Vec3d(pos_x, pos_y, 0.0));
     v.set_volume_rotation(Vec3d(0., 0., (M_PI / 180.) * rotation_angle));
+#if ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
+    v.composite_id = GLVolume::CompositeID(INT_MAX, 0, 0);    
+#else
     v.composite_id = GLVolume::CompositeID(obj_idx, 0, 0);
+#endif // ENABLE_WIPETOWER_OBJECTID_1000_REMOVAL
     v.geometry_id.first = 0;
     v.geometry_id.second = wipe_tower_instance_id().id;
     v.is_wipe_tower = true;
@@ -766,14 +1002,30 @@ int GLVolumeCollection::load_wipe_tower_preview(
     return int(volumes.size() - 1);
 }
 
-GLVolume* GLVolumeCollection::new_toolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats)
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+GLVolume* GLVolumeCollection::new_toolpath_volume(const ColorRGBA& rgba)
+{
+    GLVolume* out = new_nontoolpath_volume(rgba);
+    out->is_extrusion_path = true;
+    return out;
+}
+
+GLVolume* GLVolumeCollection::new_nontoolpath_volume(const ColorRGBA& rgba)
+{
+    GLVolume* out = new GLVolume(rgba);
+    out->is_extrusion_path = false;
+    this->volumes.emplace_back(out);
+    return out;
+}
+#else
+GLVolume* GLVolumeCollection::new_toolpath_volume(const ColorRGBA& rgba, size_t reserve_vbo_floats)
 {
 	GLVolume *out = new_nontoolpath_volume(rgba, reserve_vbo_floats);
 	out->is_extrusion_path = true;
 	return out;
 }
 
-GLVolume* GLVolumeCollection::new_nontoolpath_volume(const std::array<float, 4>& rgba, size_t reserve_vbo_floats)
+GLVolume* GLVolumeCollection::new_nontoolpath_volume(const ColorRGBA& rgba, size_t reserve_vbo_floats)
 {
 	GLVolume *out = new GLVolume(rgba);
 	out->is_extrusion_path = false;
@@ -782,6 +1034,7 @@ GLVolume* GLVolumeCollection::new_nontoolpath_volume(const std::array<float, 4>&
 	this->volumes.emplace_back(out);
 	return out;
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs& volumes, GLVolumeCollection::ERenderType type, const Transform3d& view_matrix, std::function<bool(const GLVolume&)> filter_func)
 {
@@ -790,7 +1043,7 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs& volumes, GLVolumeCo
 
     for (unsigned int i = 0; i < (unsigned int)volumes.size(); ++i) {
         GLVolume* volume = volumes[i];
-        bool is_transparent = (volume->render_color[3] < 1.0f);
+        bool is_transparent = volume->render_color.is_transparent();
         if (((type == GLVolumeCollection::ERenderType::Opaque && !is_transparent) ||
              (type == GLVolumeCollection::ERenderType::Transparent && is_transparent) ||
              type == GLVolumeCollection::ERenderType::All) &&
@@ -816,7 +1069,12 @@ GLVolumeWithIdAndZList volumes_to_render(const GLVolumePtrs& volumes, GLVolumeCo
     return list;
 }
 
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disable_cullface, const Transform3d& view_matrix, const Transform3d& projection_matrix,
+    std::function<bool(const GLVolume&)> filter_func) const
+#else
 void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disable_cullface, const Transform3d& view_matrix, std::function<bool(const GLVolume&)> filter_func) const
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 {
     GLVolumeWithIdAndZList to_render = volumes_to_render(volumes, type, view_matrix, filter_func);
     if (to_render.empty())
@@ -825,6 +1083,11 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
     GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
     if (shader == nullptr)
         return;
+
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GLShaderProgram* sink_shader  = GUI::wxGetApp().get_shader("flat");
+    GLShaderProgram* edges_shader = GUI::wxGetApp().get_shader("flat");
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     if (type == ERenderType::Transparent) {
         glsafe(::glEnable(GL_BLEND));
@@ -836,27 +1099,43 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         glsafe(::glDisable(GL_CULL_FACE));
 
     for (GLVolumeWithIdAndZ& volume : to_render) {
-        volume.first->set_render_color();
+        volume.first->set_render_color(true);
 
         // render sinking contours of non-hovered volumes
-        if (m_show_sinking_contours)
-            if (volume.first->is_sinking() && !volume.first->is_below_printbed() &&
-                volume.first->hover == GLVolume::HS_None && !volume.first->force_sinking_contours) {
-                shader->stop_using();
-                volume.first->render_sinking_contours();
-                shader->start_using();
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        shader->stop_using();
+        if (sink_shader != nullptr) {
+            sink_shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+            if (m_show_sinking_contours) {
+                if (volume.first->is_sinking() && !volume.first->is_below_printbed() &&
+                    volume.first->hover == GLVolume::HS_None && !volume.first->force_sinking_contours) {
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+                    shader->stop_using();
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
+                    volume.first->render_sinking_contours();
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+                    shader->start_using();
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
+                }
             }
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            sink_shader->stop_using();
+        }
+        shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-        glsafe(::glEnableClientState(GL_VERTEX_ARRAY));
-        glsafe(::glEnableClientState(GL_NORMAL_ARRAY));
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+            glsafe(::glEnableClientState(GL_VERTEX_ARRAY));
+            glsafe(::glEnableClientState(GL_NORMAL_ARRAY));
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 
-        shader->set_uniform("uniform_color", volume.first->render_color);
-        shader->set_uniform("z_range", m_z_range, 2);
-        shader->set_uniform("clipping_plane", m_clipping_plane, 4);
-        shader->set_uniform("print_box.min", m_print_box_min, 3);
-        shader->set_uniform("print_box.max", m_print_box_max, 3);
-        shader->set_uniform("print_box.actived", volume.first->shader_outside_printer_detection_enabled);
-        shader->set_uniform("print_box.volume_world_matrix", volume.first->world_matrix());
+        shader->set_uniform("z_range", m_z_range);
+        shader->set_uniform("clipping_plane", m_clipping_plane);
+        shader->set_uniform("print_volume.type", static_cast<int>(m_print_volume.type));
+        shader->set_uniform("print_volume.xy_data", m_print_volume.data);
+        shader->set_uniform("print_volume.z_data", m_print_volume.zs);
+        shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
         shader->set_uniform("slope.actived", m_slope.active && !volume.first->is_modifier && !volume.first->is_wipe_tower);
         shader->set_uniform("slope.volume_world_normal_matrix", static_cast<Matrix3f>(volume.first->world_matrix().matrix().block(0, 0, 3, 3).inverse().transpose().cast<float>()));
         shader->set_uniform("slope.normal_z", m_slope.normal_z);
@@ -870,6 +1149,17 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
 #endif // ENABLE_ENVIRONMENT_MAP
         glcheck();
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        volume.first->model.set_color(volume.first->render_color);
+#else
+        shader->set_uniform("uniform_color", volume.first->render_color);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Transform3d matrix = view_matrix * volume.first->world_matrix();
+        shader->set_uniform("view_model_matrix", matrix);
+        shader->set_uniform("projection_matrix", projection_matrix);
+        shader->set_uniform("normal_matrix", (Matrix3d)matrix.matrix().block(0, 0, 3, 3).inverse().transpose());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         volume.first->render();
 
 #if ENABLE_ENVIRONMENT_MAP
@@ -880,23 +1170,57 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
         glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
 
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
         glsafe(::glDisableClientState(GL_VERTEX_ARRAY));
         glsafe(::glDisableClientState(GL_NORMAL_ARRAY));
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
     }
 
     if (m_show_sinking_contours) {
-        for (GLVolumeWithIdAndZ& volume : to_render) {
-            // render sinking contours of hovered/displaced volumes
-            if (volume.first->is_sinking() && !volume.first->is_below_printbed() &&
-                (volume.first->hover != GLVolume::HS_None || volume.first->force_sinking_contours)) {
-                shader->stop_using();
-                glsafe(::glDepthFunc(GL_ALWAYS));
-                volume.first->render_sinking_contours();
-                glsafe(::glDepthFunc(GL_LESS));
-                shader->start_using();
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        shader->stop_using();
+        if (sink_shader != nullptr) {
+            sink_shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+            for (GLVolumeWithIdAndZ& volume : to_render) {
+                // render sinking contours of hovered/displaced volumes
+                if (volume.first->is_sinking() && !volume.first->is_below_printbed() &&
+                    (volume.first->hover != GLVolume::HS_None || volume.first->force_sinking_contours)) {
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+                    shader->stop_using();
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
+                    glsafe(::glDepthFunc(GL_ALWAYS));
+                    volume.first->render_sinking_contours();
+                    glsafe(::glDepthFunc(GL_LESS));
+#if !ENABLE_LEGACY_OPENGL_REMOVAL
+                    shader->start_using();
+#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
+                }
+            }
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+            sink_shader->start_using();
+        }
+        shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+    }
+
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    shader->stop_using();
+    if (edges_shader != nullptr) {
+        edges_shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+        if (m_show_non_manifold_edges && GUI::wxGetApp().app_config->get("non_manifold_edges") == "1") {
+            for (GLVolumeWithIdAndZ& volume : to_render) {
+                volume.first->render_non_manifold_edges();
             }
         }
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        edges_shader->stop_using();
     }
+    shader->start_using();
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
     if (disable_cullface)
         glsafe(::glEnable(GL_CULL_FACE));
@@ -905,60 +1229,67 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
         glsafe(::glDisable(GL_BLEND));
 }
 
-bool GLVolumeCollection::check_outside_state(const DynamicPrintConfig* config, ModelInstanceEPrintVolumeState* out_state) const
+bool GLVolumeCollection::check_outside_state(const BuildVolume &build_volume, ModelInstanceEPrintVolumeState *out_state) const
 {
-    if (config == nullptr)
-        return false;
+    const Model&        model              = GUI::wxGetApp().plater()->model();
+    auto                volume_below       = [](GLVolume& volume) -> bool
+        { return volume.object_idx() != -1 && volume.volume_idx() != -1 && volume.is_below_printbed(); };
+    // Volume is partially below the print bed, thus a pre-calculated convex hull cannot be used.
+    auto                volume_sinking     = [](GLVolume& volume) -> bool
+        { return volume.object_idx() != -1 && volume.volume_idx() != -1 && volume.is_sinking(); };
+    // Cached bounding box of a volume above the print bed.
+    auto                volume_bbox        = [volume_sinking](GLVolume& volume) -> BoundingBoxf3 
+        { return volume_sinking(volume) ? volume.transformed_non_sinking_bounding_box() : volume.transformed_convex_hull_bounding_box(); };
+    // Cached 3D convex hull of a volume above the print bed.
+    auto                volume_convex_mesh = [volume_sinking, &model](GLVolume& volume) -> const TriangleMesh&
+        { return volume_sinking(volume) ? model.objects[volume.object_idx()]->volumes[volume.volume_idx()]->mesh() : *volume.convex_hull(); };
 
-    const ConfigOptionPoints* opt = dynamic_cast<const ConfigOptionPoints*>(config->option("bed_shape"));
-    if (opt == nullptr)
-        return false;
-
-    const BoundingBox bed_box_2D = get_extents(Polygon::new_scale(opt->values));
-    BoundingBoxf3 print_volume({ unscale<double>(bed_box_2D.min.x()), unscale<double>(bed_box_2D.min.y()), 0.0 }, 
-                               { unscale<double>(bed_box_2D.max.x()), unscale<double>(bed_box_2D.max.y()),
-                               config->opt_float("max_print_height") });
-    // Allow the objects to protrude below the print bed
-    print_volume.min(2) = -1e10;
-    print_volume.min(0) -= BedEpsilon;
-    print_volume.min(1) -= BedEpsilon;
-    print_volume.max(0) += BedEpsilon;
-    print_volume.max(1) += BedEpsilon;
-
-    ModelInstanceEPrintVolumeState state = ModelInstancePVS_Inside;
-
+    ModelInstanceEPrintVolumeState overall_state = ModelInstancePVS_Inside;
     bool contained_min_one = false;
 
-    for (GLVolume* volume : this->volumes) {
-        if (volume->is_modifier || (!volume->shader_outside_printer_detection_enabled && (volume->is_wipe_tower || volume->composite_id.volume_id < 0)))
-            continue;
-
-        const BoundingBoxf3& bb = volume->transformed_convex_hull_bounding_box();
-        bool contained = print_volume.contains(bb);
-
-        volume->is_outside = !contained;
-        if (!volume->printable)
-            continue;
-
-        contained_min_one |= contained;
-
-        if (state == ModelInstancePVS_Inside && volume->is_outside)
-            state = ModelInstancePVS_Fully_Outside;
-
-        if (state == ModelInstancePVS_Fully_Outside && volume->is_outside && print_volume.intersects(bb))
-            state = ModelInstancePVS_Partly_Outside;
-    }
+    for (GLVolume* volume : this->volumes)
+        if (! volume->is_modifier && (volume->shader_outside_printer_detection_enabled || (! volume->is_wipe_tower && volume->composite_id.volume_id >= 0))) {
+            BuildVolume::ObjectState state;
+            if (volume_below(*volume))
+                state = BuildVolume::ObjectState::Below;
+            else {
+                switch (build_volume.type()) {
+                case BuildVolume::Type::Rectangle:
+                //FIXME this test does not evaluate collision of a build volume bounding box with non-convex objects.
+                    state = build_volume.volume_state_bbox(volume_bbox(*volume));
+                    break;
+                case BuildVolume::Type::Circle:
+                case BuildVolume::Type::Convex:
+                //FIXME doing test on convex hull until we learn to do test on non-convex polygons efficiently.
+                case BuildVolume::Type::Custom:
+                    state = build_volume.object_state(volume_convex_mesh(*volume).its, volume->world_matrix().cast<float>(), volume_sinking(*volume));
+                    break;
+                default:
+                    // Ignore, don't produce any collision.
+                    state = BuildVolume::ObjectState::Inside;
+                    break;
+                }
+                assert(state != BuildVolume::ObjectState::Below);
+            }
+            volume->is_outside = state != BuildVolume::ObjectState::Inside;
+            if (volume->printable) {
+                if (overall_state == ModelInstancePVS_Inside && volume->is_outside)
+                    overall_state = ModelInstancePVS_Fully_Outside;
+                if (overall_state == ModelInstancePVS_Fully_Outside && volume->is_outside && state == BuildVolume::ObjectState::Colliding)
+                    overall_state = ModelInstancePVS_Partly_Outside;
+                contained_min_one |= !volume->is_outside;
+            }
+        }
 
     if (out_state != nullptr)
-        *out_state = state;
+        *out_state = overall_state;
 
     return contained_min_one;
 }
 
 void GLVolumeCollection::reset_outside_state()
 {
-    for (GLVolume* volume : this->volumes)
-    {
+    for (GLVolume* volume : this->volumes) {
         if (volume != nullptr)
             volume->is_outside = false;
     }
@@ -966,78 +1297,55 @@ void GLVolumeCollection::reset_outside_state()
 
 void GLVolumeCollection::update_colors_by_extruder(const DynamicPrintConfig* config)
 {
-    static const float inv_255 = 1.0f / 255.0f;
+    using ColorItem = std::pair<std::string, ColorRGB>;
+    std::vector<ColorItem> colors;
 
-    struct Color
-    {
-        std::string text;
-        unsigned char rgb[3];
+    if (static_cast<PrinterTechnology>(config->opt_int("printer_technology")) == ptSLA) {
+        const std::string& txt_color = config->opt_string("material_colour").empty() ? 
+                                       print_config_def.get("material_colour")->get_default_value<ConfigOptionString>()->value : 
+                                       config->opt_string("material_colour");
+        ColorRGB rgb;
+        if (decode_color(txt_color, rgb))
+            colors.push_back({ txt_color, rgb });
+    }
+    else {
+        const ConfigOptionStrings* extruders_opt = dynamic_cast<const ConfigOptionStrings*>(config->option("extruder_colour"));
+        if (extruders_opt == nullptr)
+            return;
 
-        Color()
-            : text("")
-        {
-            rgb[0] = 255;
-            rgb[1] = 255;
-            rgb[2] = 255;
-        }
+        const ConfigOptionStrings* filamemts_opt = dynamic_cast<const ConfigOptionStrings*>(config->option("filament_colour"));
+        if (filamemts_opt == nullptr)
+            return;
 
-        void set(const std::string& text, unsigned char* rgb)
-        {
-            this->text = text;
-            ::memcpy((void*)this->rgb, (const void*)rgb, 3 * sizeof(unsigned char));
-        }
-    };
+        size_t colors_count = std::max(extruders_opt->values.size(), filamemts_opt->values.size());
+        if (colors_count == 0)
+            return;
+        colors.resize(colors_count);
 
-    if (config == nullptr)
-        return;
-
-    const ConfigOptionStrings* extruders_opt = dynamic_cast<const ConfigOptionStrings*>(config->option("extruder_colour"));
-    if (extruders_opt == nullptr)
-        return;
-
-    const ConfigOptionStrings* filamemts_opt = dynamic_cast<const ConfigOptionStrings*>(config->option("filament_colour"));
-    if (filamemts_opt == nullptr)
-        return;
-
-    unsigned int colors_count = std::max((unsigned int)extruders_opt->values.size(), (unsigned int)filamemts_opt->values.size());
-    if (colors_count == 0)
-        return;
-
-    std::vector<Color> colors(colors_count);
-
-    unsigned char rgb[3];
-    for (unsigned int i = 0; i < colors_count; ++i)
-    {
-        const std::string& txt_color = config->opt_string("extruder_colour", i);
-        if (Slic3r::GUI::BitmapCache::parse_color(txt_color, rgb))
-        {
-            colors[i].set(txt_color, rgb);
-        }
-        else
-        {
-            const std::string& txt_color = config->opt_string("filament_colour", i);
-            if (Slic3r::GUI::BitmapCache::parse_color(txt_color, rgb))
-                colors[i].set(txt_color, rgb);
+        for (unsigned int i = 0; i < colors_count; ++i) {
+            const std::string& ext_color = config->opt_string("extruder_colour", i);
+            ColorRGB rgb;
+            if (decode_color(ext_color, rgb))
+                colors[i] = { ext_color, rgb };
+            else {
+                const std::string& fil_color = config->opt_string("filament_colour", i);
+                if (decode_color(fil_color, rgb))
+                    colors[i] = { fil_color, rgb };
+            }
         }
     }
 
-    for (GLVolume* volume : volumes)
-    {
-        if ((volume == nullptr) || volume->is_modifier || volume->is_wipe_tower || (volume->volume_idx() < 0))
+    for (GLVolume* volume : volumes) {
+        if (volume == nullptr || volume->is_modifier || volume->is_wipe_tower || volume->volume_idx() < 0)
             continue;
 
         int extruder_id = volume->extruder_id - 1;
-        if ((extruder_id < 0) || ((int)colors.size() <= extruder_id))
+        if (extruder_id < 0 || (int)colors.size() <= extruder_id)
             extruder_id = 0;
 
-        const Color& color = colors[extruder_id];
-        if (!color.text.empty())
-        {
-            for (int i = 0; i < 3; ++i)
-            {
-                volume->color[i] = (float)color.rgb[i] * inv_255;
-            }
-        }
+        const ColorItem& color = colors[extruder_id];
+        if (!color.first.empty())
+            volume->color = to_rgba(color.second, volume->color.a());
     }
 }
 
@@ -1089,6 +1397,466 @@ std::string GLVolumeCollection::log_memory_info() const
 	return " (GLVolumeCollection RAM: " + format_memsize_MB(this->cpu_memory_used()) + " GPU: " + format_memsize_MB(this->gpu_memory_used()) + " Both: " + format_memsize_MB(this->gpu_memory_used()) + ")";
 }
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+static void thick_lines_to_geometry(
+    const Lines&               lines,
+    const std::vector<double>& widths,
+    const std::vector<double>& heights,
+    bool                       closed,
+    double                     top_z,
+    GUI::GLModel::Geometry&    geometry)
+{
+    assert(!lines.empty());
+    if (lines.empty())
+        return;
+
+    enum Direction : unsigned char
+    {
+        Left,
+        Right,
+        Top,
+        Bottom
+    };
+
+    // right, left, top, bottom
+    std::array<int, 4> idx_prev    = { -1, -1, -1, -1 };
+    std::array<int, 4> idx_initial = { -1, -1, -1, -1 };
+
+    double bottom_z_prev = 0.0;
+    Vec2d  b1_prev(Vec2d::Zero());
+    Vec2d  v_prev(Vec2d::Zero());
+    double len_prev = 0.0;
+    double width_initial = 0.0;
+    double bottom_z_initial = 0.0;
+
+    // loop once more in case of closed loops
+    const size_t lines_end = closed ? (lines.size() + 1) : lines.size();
+    for (size_t ii = 0; ii < lines_end; ++ii) {
+        const size_t i = (ii == lines.size()) ? 0 : ii;
+        const Line& line = lines[i];
+        const double bottom_z = top_z - heights[i];
+        const double middle_z = 0.5 * (top_z + bottom_z);
+        const double width = widths[i];
+
+        const bool is_first = (ii == 0);
+        const bool is_last = (ii == lines_end - 1);
+        const bool is_closing = closed && is_last;
+
+        const Vec2d v = unscale(line.vector()).normalized();
+        const double len = unscale<double>(line.length());
+
+        const Vec2d a = unscale(line.a);
+        const Vec2d b = unscale(line.b);
+        Vec2d a1 = a;
+        Vec2d a2 = a;
+        Vec2d b1 = b;
+        Vec2d b2 = b;
+        {
+            const double dist = 0.5 * width;  // scaled
+            const double dx = dist * v.x();
+            const double dy = dist * v.y();
+            a1 += Vec2d(+dy, -dx);
+            a2 += Vec2d(-dy, +dx);
+            b1 += Vec2d(+dy, -dx);
+            b2 += Vec2d(-dy, +dx);
+        }
+
+        // calculate new XY normals
+        const Vec2d xy_right_normal = unscale(line.normal()).normalized();
+
+        std::array<int, 4> idx_a = { 0, 0, 0, 0 };
+        std::array<int, 4> idx_b = { 0, 0, 0, 0 };
+        int idx_last = int(geometry.vertices_count());
+
+        const bool bottom_z_different = bottom_z_prev != bottom_z;
+        bottom_z_prev = bottom_z;
+
+        if (!is_first && bottom_z_different) {
+            // Found a change of the layer thickness -> Add a cap at the end of the previous segment.
+            geometry.add_triangle(idx_b[Bottom], idx_b[Left], idx_b[Top]);
+            geometry.add_triangle(idx_b[Bottom], idx_b[Top], idx_b[Right]);
+        }
+
+        // Share top / bottom vertices if possible.
+        if (is_first) {
+            idx_a[Top] = idx_last++;
+            geometry.add_vertex(Vec3f(a.x(), a.y(), top_z), Vec3f(0.0f, 0.0f, 1.0f));
+        }
+        else
+            idx_a[Top] = idx_prev[Top];
+
+        if (is_first || bottom_z_different) {
+            // Start of the 1st line segment or a change of the layer thickness while maintaining the print_z.
+            idx_a[Bottom] = idx_last++;
+            geometry.add_vertex(Vec3f(a.x(), a.y(), bottom_z), Vec3f(0.0f, 0.0f, -1.0f));
+            idx_a[Left] = idx_last++;
+            geometry.add_vertex(Vec3f(a2.x(), a2.y(), middle_z), Vec3f(-xy_right_normal.x(), -xy_right_normal.y(), 0.0f));
+            idx_a[Right] = idx_last++;
+            geometry.add_vertex(Vec3f(a1.x(), a1.y(), middle_z), Vec3f(xy_right_normal.x(), xy_right_normal.y(), 0.0f));
+        }
+        else
+            idx_a[Bottom] = idx_prev[Bottom];
+
+        if (is_first) {
+            // Start of the 1st line segment.
+            width_initial = width;
+            bottom_z_initial = bottom_z;
+            idx_initial = idx_a;
+        }
+        else {
+            // Continuing a previous segment.
+            // Share left / right vertices if possible.
+            const double v_dot = v_prev.dot(v);
+            // To reduce gpu memory usage, we try to reuse vertices
+            // To reduce the visual artifacts, due to averaged normals, we allow to reuse vertices only when any of two adjacent edges 
+            // is longer than a fixed threshold.
+            // The following value is arbitrary, it comes from tests made on a bunch of models showing the visual artifacts
+            const double len_threshold = 2.5;
+
+            // Generate new vertices if the angle between adjacent edges is greater than 45 degrees or thresholds conditions are met
+            const bool sharp = (v_dot < 0.707) || (len_prev > len_threshold) || (len > len_threshold);
+            if (sharp) {
+                if (!bottom_z_different) {
+                    // Allocate new left / right points for the start of this segment as these points will receive their own normals to indicate a sharp turn.
+                    idx_a[Right] = idx_last++;
+                    geometry.add_vertex(Vec3f(a1.x(), a1.y(), middle_z), Vec3f(xy_right_normal.x(), xy_right_normal.y(), 0.0f));
+                    idx_a[Left] = idx_last++;
+                    geometry.add_vertex(Vec3f(a2.x(), a2.y(), middle_z), Vec3f(-xy_right_normal.x(), -xy_right_normal.y(), 0.0f));
+                    if (cross2(v_prev, v) > 0.0) {
+                        // Right turn. Fill in the right turn wedge.
+                        geometry.add_triangle(idx_prev[Right], idx_a[Right], idx_prev[Top]);
+                        geometry.add_triangle(idx_prev[Right], idx_prev[Bottom], idx_a[Right]);
+                    }
+                    else {
+                        // Left turn. Fill in the left turn wedge.
+                        geometry.add_triangle(idx_prev[Left], idx_prev[Top], idx_a[Left]);
+                        geometry.add_triangle(idx_prev[Left], idx_a[Left], idx_prev[Bottom]);
+                    }
+                }
+            }
+            else {
+                if (!bottom_z_different) {
+                    // The two successive segments are nearly collinear.
+                    idx_a[Left]  = idx_prev[Left];
+                    idx_a[Right] = idx_prev[Right];
+                }
+            }
+            if (is_closing) {
+                if (!sharp) {
+                    if (!bottom_z_different) {
+                        // Closing a loop with smooth transition. Unify the closing left / right vertices.
+                        geometry.set_vertex(idx_initial[Left], geometry.extract_position_3(idx_prev[Left]), geometry.extract_normal_3(idx_prev[Left]));
+                        geometry.set_vertex(idx_initial[Right], geometry.extract_position_3(idx_prev[Right]), geometry.extract_normal_3(idx_prev[Right]));
+                        geometry.remove_vertex(geometry.vertices_count() - 1);
+                        geometry.remove_vertex(geometry.vertices_count() - 1);
+                        // Replace the left / right vertex indices to point to the start of the loop.
+                        const size_t indices_count = geometry.indices_count();
+                        for (size_t u = indices_count - 24; u < indices_count; ++u) {
+                            const unsigned int id = geometry.extract_index(u);
+                            if (id == (unsigned int)idx_prev[Left])
+                                geometry.set_index(u, (unsigned int)idx_initial[Left]);
+                            else if (id == (unsigned int)idx_prev[Right])
+                                geometry.set_index(u, (unsigned int)idx_initial[Right]);
+                        }
+                    }
+                }
+                // This is the last iteration, only required to solve the transition.
+                break;
+            }
+        }
+
+        // Only new allocate top / bottom vertices, if not closing a loop.
+        if (is_closing)
+            idx_b[Top] = idx_initial[Top];
+        else {
+            idx_b[Top] = idx_last++;
+            geometry.add_vertex(Vec3f(b.x(), b.y(), top_z), Vec3f(0.0f, 0.0f, 1.0f));
+        }
+
+        if (is_closing && width == width_initial && bottom_z == bottom_z_initial)
+            idx_b[Bottom] = idx_initial[Bottom];
+        else {
+            idx_b[Bottom] = idx_last++;
+            geometry.add_vertex(Vec3f(b.x(), b.y(), bottom_z), Vec3f(0.0f, 0.0f, -1.0f));
+        }
+        // Generate new vertices for the end of this line segment.
+        idx_b[Left] = idx_last++;
+        geometry.add_vertex(Vec3f(b2.x(), b2.y(), middle_z), Vec3f(-xy_right_normal.x(), -xy_right_normal.y(), 0.0f));
+        idx_b[Right] = idx_last++;
+        geometry.add_vertex(Vec3f(b1.x(), b1.y(), middle_z), Vec3f(xy_right_normal.x(), xy_right_normal.y(), 0.0f));
+
+        idx_prev = idx_b;
+        bottom_z_prev = bottom_z;
+        b1_prev = b1;
+        v_prev = v;
+        len_prev = len;
+
+        if (bottom_z_different && (closed || (!is_first && !is_last))) {
+            // Found a change of the layer thickness -> Add a cap at the beginning of this segment.
+            geometry.add_triangle(idx_a[Bottom], idx_a[Right], idx_a[Top]);
+            geometry.add_triangle(idx_a[Bottom], idx_a[Top], idx_a[Left]);
+        }
+
+        if (!closed) {
+            // Terminate open paths with caps.
+            if (is_first) {
+                geometry.add_triangle(idx_a[Bottom], idx_a[Right], idx_a[Top]);
+                geometry.add_triangle(idx_a[Bottom], idx_a[Top], idx_a[Left]);
+            }
+            // We don't use 'else' because both cases are true if we have only one line.
+            if (is_last) {
+                geometry.add_triangle(idx_b[Bottom], idx_b[Left], idx_b[Top]);
+                geometry.add_triangle(idx_b[Bottom], idx_b[Top], idx_b[Right]);
+            }
+        }
+
+        // Add quads for a straight hollow tube-like segment.
+        // bottom-right face
+        geometry.add_triangle(idx_a[Bottom], idx_b[Bottom], idx_b[Right]);
+        geometry.add_triangle(idx_a[Bottom], idx_b[Right], idx_a[Right]);
+        // top-right face
+        geometry.add_triangle(idx_a[Right], idx_b[Right], idx_b[Top]);
+        geometry.add_triangle(idx_a[Right], idx_b[Top], idx_a[Top]);
+        // top-left face
+        geometry.add_triangle(idx_a[Top], idx_b[Top], idx_b[Left]);
+        geometry.add_triangle(idx_a[Top], idx_b[Left], idx_a[Left]);
+        // bottom-left face
+        geometry.add_triangle(idx_a[Left], idx_b[Left], idx_b[Bottom]);
+        geometry.add_triangle(idx_a[Left], idx_b[Bottom], idx_a[Bottom]);
+    }
+}
+
+// caller is responsible for supplying NO lines with zero length
+static void thick_lines_to_geometry(
+    const Lines3&              lines,
+    const std::vector<double>& widths,
+    const std::vector<double>& heights,
+    bool                       closed,
+    GUI::GLModel::Geometry&    geometry)
+{
+    assert(!lines.empty());
+    if (lines.empty())
+        return;
+
+    enum Direction : unsigned char
+    {
+        Left,
+        Right,
+        Top,
+        Bottom
+    };
+
+    // left, right, top, bottom
+    std::array<int, 4> idx_prev    = { -1, -1, -1, -1 };
+    std::array<int, 4> idx_initial = { -1, -1, -1, -1 };
+
+    double z_prev = 0.0;
+    double len_prev = 0.0;
+    Vec3d  n_right_prev = Vec3d::Zero();
+    Vec3d  n_top_prev = Vec3d::Zero();
+    Vec3d  unit_v_prev = Vec3d::Zero();
+    double width_initial = 0.0;
+
+    // new vertices around the line endpoints
+    // left, right, top, bottom
+    std::array<Vec3d, 4> a = { Vec3d::Zero(), Vec3d::Zero(), Vec3d::Zero(), Vec3d::Zero() };
+    std::array<Vec3d, 4> b = { Vec3d::Zero(), Vec3d::Zero(), Vec3d::Zero(), Vec3d::Zero() };
+
+    // loop once more in case of closed loops
+    const size_t lines_end = closed ? (lines.size() + 1) : lines.size();
+    for (size_t ii = 0; ii < lines_end; ++ii) {
+        const size_t i = (ii == lines.size()) ? 0 : ii;
+
+        const Line3& line = lines[i];
+        const double height = heights[i];
+        const double width = widths[i];
+
+        const Vec3d unit_v = unscale(line.vector()).normalized();
+        const double len = unscale<double>(line.length());
+
+        Vec3d n_top = Vec3d::Zero();
+        Vec3d n_right = Vec3d::Zero();
+
+        if (line.a.x() == line.b.x() && line.a.y() == line.b.y()) {
+            // vertical segment
+            n_top = Vec3d::UnitY();
+            n_right = Vec3d::UnitX();
+            if (line.a.z() < line.b.z())
+                n_right = -n_right;
+        }
+        else {
+            // horizontal segment
+            n_right = unit_v.cross(Vec3d::UnitZ()).normalized();
+            n_top = n_right.cross(unit_v).normalized();
+        }
+
+        const Vec3d rl_displacement = 0.5 * width * n_right;
+        const Vec3d tb_displacement = 0.5 * height * n_top;
+        const Vec3d l_a = unscale(line.a);
+        const Vec3d l_b = unscale(line.b);
+
+        a[Right]  = l_a + rl_displacement;
+        a[Left]   = l_a - rl_displacement;
+        a[Top]    = l_a + tb_displacement;
+        a[Bottom] = l_a - tb_displacement;
+        b[Right]  = l_b + rl_displacement;
+        b[Left]   = l_b - rl_displacement;
+        b[Top]    = l_b + tb_displacement;
+        b[Bottom] = l_b - tb_displacement;
+
+        const Vec3d n_bottom = -n_top;
+        const Vec3d n_left = -n_right;
+
+        std::array<int, 4> idx_a = { 0, 0, 0, 0};
+        std::array<int, 4> idx_b = { 0, 0, 0, 0 };
+        int idx_last = int(geometry.vertices_count());
+
+        const bool z_different = (z_prev != l_a.z());
+        z_prev = l_b.z();
+
+        // Share top / bottom vertices if possible.
+        if (ii == 0) {
+            idx_a[Top] = idx_last++;
+            geometry.add_vertex((Vec3f)a[Top].cast<float>(), (Vec3f)n_top.cast<float>());
+        }
+        else
+            idx_a[Top] = idx_prev[Top];
+
+        if (ii == 0 || z_different) {
+            // Start of the 1st line segment or a change of the layer thickness while maintaining the print_z.
+            idx_a[Bottom] = idx_last++;
+            geometry.add_vertex((Vec3f)a[Bottom].cast<float>(), (Vec3f)n_bottom.cast<float>());
+            idx_a[Left] = idx_last++;
+            geometry.add_vertex((Vec3f)a[Left].cast<float>(), (Vec3f)n_left.cast<float>());
+            idx_a[Right] = idx_last++;
+            geometry.add_vertex((Vec3f)a[Right].cast<float>(), (Vec3f)n_right.cast<float>());
+        }
+        else
+            idx_a[Bottom] = idx_prev[Bottom];
+
+        if (ii == 0) {
+            // Start of the 1st line segment.
+            width_initial = width;
+            idx_initial =  idx_a;
+        }
+        else {
+            // Continuing a previous segment.
+            // Share left / right vertices if possible.
+            const double v_dot = unit_v_prev.dot(unit_v);
+            const bool is_right_turn = n_top_prev.dot(unit_v_prev.cross(unit_v)) > 0.0;
+
+            // To reduce gpu memory usage, we try to reuse vertices
+            // To reduce the visual artifacts, due to averaged normals, we allow to reuse vertices only when any of two adjacent edges 
+            // is longer than a fixed threshold.
+            // The following value is arbitrary, it comes from tests made on a bunch of models showing the visual artifacts
+            const double len_threshold = 2.5;
+
+            // Generate new vertices if the angle between adjacent edges is greater than 45 degrees or thresholds conditions are met
+            const bool is_sharp = v_dot < 0.707 || len_prev > len_threshold || len > len_threshold;
+            if (is_sharp) {
+                // Allocate new left / right points for the start of this segment as these points will receive their own normals to indicate a sharp turn.
+                idx_a[Right] = idx_last++;
+                geometry.add_vertex((Vec3f)a[Right].cast<float>(), (Vec3f)n_right.cast<float>());
+                idx_a[Left] = idx_last++;
+                geometry.add_vertex((Vec3f)a[Left].cast<float>(), (Vec3f)n_left.cast<float>());
+
+                if (is_right_turn) {
+                    // Right turn. Fill in the right turn wedge.
+                    geometry.add_triangle(idx_prev[Right], idx_a[Right], idx_prev[Top]);
+                    geometry.add_triangle(idx_prev[Right], idx_prev[Bottom], idx_a[Right]);
+                }
+                else {
+                    // Left turn. Fill in the left turn wedge.
+                    geometry.add_triangle(idx_prev[Left], idx_prev[Top], idx_a[Left]);
+                    geometry.add_triangle(idx_prev[Left], idx_a[Left], idx_prev[Bottom]);
+                }
+            }
+            else {
+                // The two successive segments are nearly collinear.
+                idx_a[Left] = idx_prev[Left];
+                idx_a[Right] = idx_prev[Right];
+            }
+
+            if (ii == lines.size()) {
+                if (!is_sharp) {
+                    // Closing a loop with smooth transition. Unify the closing left / right vertices.
+                    geometry.set_vertex(idx_initial[Left], geometry.extract_position_3(idx_prev[Left]), geometry.extract_normal_3(idx_prev[Left]));
+                    geometry.set_vertex(idx_initial[Right], geometry.extract_position_3(idx_prev[Right]), geometry.extract_normal_3(idx_prev[Right]));
+                    geometry.remove_vertex(geometry.vertices_count() - 1);
+                    geometry.remove_vertex(geometry.vertices_count() - 1);
+                    // Replace the left / right vertex indices to point to the start of the loop.
+                    const size_t indices_count = geometry.indices_count();
+                    for (size_t u = indices_count - 24; u < indices_count; ++u) {
+                        const unsigned int id = geometry.extract_index(u);
+                        if (id == (unsigned int)idx_prev[Left])
+                            geometry.set_index(u, (unsigned int)idx_initial[Left]);
+                        else if (id == (unsigned int)idx_prev[Right])
+                            geometry.set_index(u, (unsigned int)idx_initial[Right]);
+                    }
+                }
+
+                // This is the last iteration, only required to solve the transition.
+                break;
+            }
+        }
+
+        // Only new allocate top / bottom vertices, if not closing a loop.
+        if (closed && ii + 1 == lines.size())
+            idx_b[Top] = idx_initial[Top];
+        else {
+            idx_b[Top] = idx_last++;
+            geometry.add_vertex((Vec3f)b[Top].cast<float>(), (Vec3f)n_top.cast<float>());
+        }
+
+        if (closed && ii + 1 == lines.size() && width == width_initial)
+            idx_b[Bottom] = idx_initial[Bottom];
+        else {
+            idx_b[Bottom] = idx_last++;
+            geometry.add_vertex((Vec3f)b[Bottom].cast<float>(), (Vec3f)n_bottom.cast<float>());
+        }
+
+        // Generate new vertices for the end of this line segment.
+        idx_b[Left] = idx_last++;
+        geometry.add_vertex((Vec3f)b[Left].cast<float>(), (Vec3f)n_left.cast<float>());
+        idx_b[Right] = idx_last++;
+        geometry.add_vertex((Vec3f)b[Right].cast<float>(), (Vec3f)n_right.cast<float>());
+
+        idx_prev = idx_b;
+        n_right_prev = n_right;
+        n_top_prev = n_top;
+        unit_v_prev = unit_v;
+        len_prev = len;
+
+        if (!closed) {
+            // Terminate open paths with caps.
+            if (i == 0) {
+                geometry.add_triangle(idx_a[Bottom], idx_a[Right], idx_a[Top]);
+                geometry.add_triangle(idx_a[Bottom], idx_a[Top], idx_a[Left]);
+            }
+
+            // We don't use 'else' because both cases are true if we have only one line.
+            if (i + 1 == lines.size()) {
+                geometry.add_triangle(idx_b[Bottom], idx_b[Left], idx_b[Top]);
+                geometry.add_triangle(idx_b[Bottom], idx_b[Top], idx_b[Right]);
+            }
+        }
+
+        // Add quads for a straight hollow tube-like segment.
+        // bottom-right face
+        geometry.add_triangle(idx_a[Bottom], idx_b[Bottom], idx_b[Right]);
+        geometry.add_triangle(idx_a[Bottom], idx_b[Right], idx_a[Right]);
+        // top-right face
+        geometry.add_triangle(idx_a[Right], idx_b[Right], idx_b[Top]);
+        geometry.add_triangle(idx_a[Right], idx_b[Top], idx_a[Top]);
+        // top-left face
+        geometry.add_triangle(idx_a[Top], idx_b[Top], idx_b[Left]);
+        geometry.add_triangle(idx_a[Top], idx_b[Left], idx_a[Left]);
+        // bottom-left face
+        geometry.add_triangle(idx_a[Left], idx_b[Left], idx_b[Bottom]);
+        geometry.add_triangle(idx_a[Left], idx_b[Bottom], idx_a[Bottom]);
+    }
+}
+#else
 // caller is responsible for supplying NO lines with zero length
 static void thick_lines_to_indexed_vertex_array(
     const Lines                 &lines, 
@@ -1598,7 +2366,30 @@ static void point_to_indexed_vertex_array(const Vec3crd& point,
     volume.push_triangle(idxs[3], idxs[1], idxs[4]);
     volume.push_triangle(idxs[0], idxs[3], idxs[4]);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::thick_lines_to_verts(
+    const Lines&               lines,
+    const std::vector<double>& widths,
+    const std::vector<double>& heights,
+    bool                       closed,
+    double                     top_z,
+    GUI::GLModel::Geometry&    geometry)
+{
+    thick_lines_to_geometry(lines, widths, heights, closed, top_z, geometry);
+}
+
+void _3DScene::thick_lines_to_verts(
+    const Lines3&              lines,
+    const std::vector<double>& widths,
+    const std::vector<double>& heights,
+    bool                       closed,
+    GUI::GLModel::Geometry&    geometry)
+{
+    thick_lines_to_geometry(lines, widths, heights, closed, geometry);
+}
+#else
 void _3DScene::thick_lines_to_verts(
     const Lines                 &lines,
     const std::vector<double>   &widths,
@@ -1640,8 +2431,21 @@ void _3DScene::extrusionentity_to_verts(const ExtrusionPath &extrusion_path, flo
 {
 	extrusionentity_to_verts(extrusion_path.polyline, extrusion_path.width, extrusion_path.height, print_z, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 // Fill in the qverts and tverts with quads and triangles for the extrusion_path.
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::extrusionentity_to_verts(const ExtrusionPath& extrusion_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
+{
+    Polyline            polyline = extrusion_path.polyline;
+    polyline.remove_duplicate_points();
+    polyline.translate(copy);
+    const Lines               lines = polyline.lines();
+    std::vector<double> widths(lines.size(), extrusion_path.width);
+    std::vector<double> heights(lines.size(), extrusion_path.height);
+    thick_lines_to_verts(lines, widths, heights, false, print_z, geometry);
+}
+#else
 void _3DScene::extrusionentity_to_verts(const ExtrusionPath &extrusion_path, float print_z, const Point &copy, GLVolume &volume)
 {
     Polyline            polyline = extrusion_path.polyline;
@@ -1652,8 +2456,27 @@ void _3DScene::extrusionentity_to_verts(const ExtrusionPath &extrusion_path, flo
     std::vector<double> heights(lines.size(), extrusion_path.height);
     thick_lines_to_verts(lines, widths, heights, false, print_z, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 // Fill in the qverts and tverts with quads and triangles for the extrusion_loop.
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::extrusionentity_to_verts(const ExtrusionLoop& extrusion_loop, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
+{
+    Lines               lines;
+    std::vector<double> widths;
+    std::vector<double> heights;
+    for (const ExtrusionPath& extrusion_path : extrusion_loop.paths) {
+        Polyline            polyline = extrusion_path.polyline;
+        polyline.remove_duplicate_points();
+        polyline.translate(copy);
+        const Lines lines_this = polyline.lines();
+        append(lines, lines_this);
+        widths.insert(widths.end(), lines_this.size(), extrusion_path.width);
+        heights.insert(heights.end(), lines_this.size(), extrusion_path.height);
+    }
+    thick_lines_to_verts(lines, widths, heights, true, print_z, geometry);
+}
+#else
 void _3DScene::extrusionentity_to_verts(const ExtrusionLoop &extrusion_loop, float print_z, const Point &copy, GLVolume &volume)
 {
     Lines               lines;
@@ -1670,8 +2493,27 @@ void _3DScene::extrusionentity_to_verts(const ExtrusionLoop &extrusion_loop, flo
     }
     thick_lines_to_verts(lines, widths, heights, true, print_z, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 // Fill in the qverts and tverts with quads and triangles for the extrusion_multi_path.
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::extrusionentity_to_verts(const ExtrusionMultiPath& extrusion_multi_path, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
+{
+    Lines               lines;
+    std::vector<double> widths;
+    std::vector<double> heights;
+    for (const ExtrusionPath& extrusion_path : extrusion_multi_path.paths) {
+        Polyline            polyline = extrusion_path.polyline;
+        polyline.remove_duplicate_points();
+        polyline.translate(copy);
+        const Lines lines_this = polyline.lines();
+        append(lines, lines_this);
+        widths.insert(widths.end(), lines_this.size(), extrusion_path.width);
+        heights.insert(heights.end(), lines_this.size(), extrusion_path.height);
+    }
+    thick_lines_to_verts(lines, widths, heights, false, print_z, geometry);
+}
+#else
 void _3DScene::extrusionentity_to_verts(const ExtrusionMultiPath &extrusion_multi_path, float print_z, const Point &copy, GLVolume &volume)
 {
     Lines               lines;
@@ -1688,13 +2530,49 @@ void _3DScene::extrusionentity_to_verts(const ExtrusionMultiPath &extrusion_mult
     }
     thick_lines_to_verts(lines, widths, heights, false, print_z, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::extrusionentity_to_verts(const ExtrusionEntityCollection& extrusion_entity_collection, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
+{
+    for (const ExtrusionEntity* extrusion_entity : extrusion_entity_collection.entities)
+        extrusionentity_to_verts(extrusion_entity, print_z, copy, geometry);
+}
+#else
 void _3DScene::extrusionentity_to_verts(const ExtrusionEntityCollection &extrusion_entity_collection, float print_z, const Point &copy, GLVolume &volume)
 {
     for (const ExtrusionEntity *extrusion_entity : extrusion_entity_collection.entities)
         extrusionentity_to_verts(extrusion_entity, print_z, copy, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+void _3DScene::extrusionentity_to_verts(const ExtrusionEntity* extrusion_entity, float print_z, const Point& copy, GUI::GLModel::Geometry& geometry)
+{
+    if (extrusion_entity != nullptr) {
+        auto* extrusion_path = dynamic_cast<const ExtrusionPath*>(extrusion_entity);
+        if (extrusion_path != nullptr)
+            extrusionentity_to_verts(*extrusion_path, print_z, copy, geometry);
+        else {
+            auto* extrusion_loop = dynamic_cast<const ExtrusionLoop*>(extrusion_entity);
+            if (extrusion_loop != nullptr)
+                extrusionentity_to_verts(*extrusion_loop, print_z, copy, geometry);
+            else {
+                auto* extrusion_multi_path = dynamic_cast<const ExtrusionMultiPath*>(extrusion_entity);
+                if (extrusion_multi_path != nullptr)
+                    extrusionentity_to_verts(*extrusion_multi_path, print_z, copy, geometry);
+                else {
+                    auto* extrusion_entity_collection = dynamic_cast<const ExtrusionEntityCollection*>(extrusion_entity);
+                    if (extrusion_entity_collection != nullptr)
+                        extrusionentity_to_verts(*extrusion_entity_collection, print_z, copy, geometry);
+                    else
+                        throw Slic3r::RuntimeError("Unexpected extrusion_entity type in to_verts()");
+                }
+            }
+        }
+    }
+}
+#else
 void _3DScene::extrusionentity_to_verts(const ExtrusionEntity *extrusion_entity, float print_z, const Point &copy, GLVolume &volume)
 {
     if (extrusion_entity != nullptr) {
@@ -1713,9 +2591,8 @@ void _3DScene::extrusionentity_to_verts(const ExtrusionEntity *extrusion_entity,
                     auto *extrusion_entity_collection = dynamic_cast<const ExtrusionEntityCollection*>(extrusion_entity);
                     if (extrusion_entity_collection != nullptr)
                         extrusionentity_to_verts(*extrusion_entity_collection, print_z, copy, volume);
-                    else {
+                    else
                         throw Slic3r::RuntimeError("Unexpected extrusion_entity type in to_verts()");
-                    }
                 }
             }
         }
@@ -1734,5 +2611,6 @@ void _3DScene::point3_to_verts(const Vec3crd& point, double width, double height
 {
     thick_point_to_verts(point, width, height, volume);
 }
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 } // namespace Slic3r

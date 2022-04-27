@@ -13,10 +13,10 @@
 #include "../BoundingBox.hpp"
 #include "../Exception.hpp"
 #include "../Utils.hpp"
+#include "../ExPolygon.hpp"
 
 namespace Slic3r {
 
-class ExPolygon;
 class Surface;
 enum InfillPattern : int;
 
@@ -43,6 +43,9 @@ struct FillParams
     // 1000mm is roughly the maximum length line that fits into a 32bit coord_t.
     float       anchor_length       { 1000.f };
     float       anchor_length_max   { 1000.f };
+
+    // G-code resolution.
+    double      resolution          { 0.0125 };
 
     // Don't adjust spacing to fill the space evenly.
     bool        dont_adjust 	{ true };
@@ -122,7 +125,7 @@ protected:
         unsigned int                      /* thickness_layers */,
         const std::pair<float, Point>   & /* direction */, 
         ExPolygon                         /* expolygon */,
-        Polylines                       & /* polylines_out */) {};
+        Polylines                       & /* polylines_out */) {}
 
     virtual float _layer_angle(size_t idx) const { return (idx & 1) ? float(M_PI/2.) : 0; }
 

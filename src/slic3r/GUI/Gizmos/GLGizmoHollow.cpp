@@ -20,7 +20,6 @@ namespace GUI {
 GLGizmoHollow::GLGizmoHollow(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
 {
-    m_vbo_cylinder.init_from(its_make_cylinder(1., 1.));
 }
 
 
@@ -43,7 +42,7 @@ bool GLGizmoHollow::on_init()
     return true;
 }
 
-void GLGizmoHollow::set_sla_support_data(ModelObject*, const Selection&)
+void GLGizmoHollow::data_changed()
 {
     if (! m_c->selection_info())
         return;
@@ -63,6 +62,9 @@ void GLGizmoHollow::set_sla_support_data(ModelObject*, const Selection&)
 
 void GLGizmoHollow::on_render()
 {
+    if (!m_cylinder.is_initialized())
+        m_cylinder.init_from(its_make_cylinder(1.0, 1.0));
+
     const Selection& selection = m_parent.get_selection();
     const CommonGizmosDataObjects::SelectionInfo* sel_info = m_c->selection_info();
 
@@ -99,85 +101,116 @@ void GLGizmoHollow::on_render_for_picking()
     render_points(selection, true);
 }
 
-void GLGizmoHollow::render_points(const Selection& selection, bool picking) const
+void GLGizmoHollow::render_points(const Selection& selection, bool picking)
 {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+    GLShaderProgram* shader = picking ? wxGetApp().get_shader("flat") : wxGetApp().get_shader("gouraud_light");
+    if (shader == nullptr)
+        return;
+
+    shader->start_using();
+    ScopeGuard guard([shader]() { shader->stop_using(); });
+#else
     GLShaderProgram* shader = picking ? nullptr : wxGetApp().get_shader("gouraud_light");
     if (shader)
         shader->start_using();
     ScopeGuard guard([shader]() { if (shader) shader->stop_using(); });
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     const GLVolume* vol = selection.get_volume(*selection.get_volume_idxs().begin());
-    const Transform3d& instance_scaling_matrix_inverse = vol->get_instance_transformation().get_matrix(true, true, false, true).inverse();
-    const Transform3d& instance_matrix = vol->get_instance_transformation().get_matrix();
+    Geometry::Transformation trafo =  vol->get_instance_transformation() * vol->get_volume_transformation();
+
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    const Transform3d instance_scaling_matrix_inverse = vol->get_instance_transformation().get_matrix(true, true, false, true).inverse();
+    const Transform3d instance_matrix = Geometry::assemble_transform(m_c->selection_info()->get_sla_shift() * Vec3d::UnitZ()) * trafo.get_matrix();
+
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    const Transform3d& view_matrix = camera.get_view_matrix();
+    const Transform3d& projection_matrix = camera.get_projection_matrix();
+
+    shader->set_uniform("projection_matrix", projection_matrix);
+#else
+    const Transform3d& instance_scaling_matrix_inverse = trafo.get_matrix(true, true, false, true).inverse();
+    const Transform3d& instance_matrix = trafo.get_matrix();
 
     glsafe(::glPushMatrix());
     glsafe(::glTranslated(0.0, 0.0, m_c->selection_info()->get_sla_shift()));
     glsafe(::glMultMatrixd(instance_matrix.data()));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
-    std::array<float, 4> render_color;
+    ColorRGBA render_color;
     const sla::DrainHoles& drain_holes = m_c->selection_info()->model_object()->sla_drain_holes;
-    size_t cache_size = drain_holes.size();
+    const size_t cache_size = drain_holes.size();
 
     for (size_t i = 0; i < cache_size; ++i) {
         const sla::DrainHole& drain_hole = drain_holes[i];
-        const bool& point_selected = m_selected[i];
+        const bool point_selected = m_selected[i];
 
         if (is_mesh_point_clipped(drain_hole.pos.cast<double>()))
             continue;
 
         // First decide about the color of the point.
-        if (picking) {
-            std::array<float, 4> color = picking_color_component(i);
-            render_color = color;
-        }
+        if (picking)
+            render_color = picking_color_component(i);
         else {
-            if (size_t(m_hover_id) == i) {
-                render_color = {0.f, 1.f, 1.f, 1.f};
-            }
+            if (size_t(m_hover_id) == i)
+                render_color = ColorRGBA::CYAN();
             else if (m_c->hollowed_mesh() &&
                        i < m_c->hollowed_mesh()->get_drainholes().size() &&
                        m_c->hollowed_mesh()->get_drainholes()[i].failed) {
-                render_color = {1.f, 0.f, 0.f, .5f};
+                render_color = { 1.0f, 0.0f, 0.0f, 0.5f };
             }
-            else { // neigher hover nor picking
-
-                render_color[0] = point_selected ? 1.0f : 1.f;
-                render_color[1] = point_selected ? 0.3f : 1.f;
-                render_color[2] = point_selected ? 0.3f : 1.f;
-                render_color[3] = 0.5f;
-            }
+            else  // neither hover nor picking
+                render_color = point_selected ? ColorRGBA(1.0f, 0.3f, 0.3f, 0.5f) : ColorRGBA(1.0f, 1.0f, 1.0f, 0.5f);
         }
 
-        const_cast<GLModel*>(&m_vbo_cylinder)->set_color(-1, render_color);
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        m_cylinder.set_color(render_color);
+#else
+        const_cast<GLModel*>(&m_cylinder)->set_color(-1, render_color);
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
         // Inverse matrix of the instance scaling is applied so that the mark does not scale with the object.
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Transform3d hole_matrix = Geometry::assemble_transform(drain_hole.pos.cast<double>()) * instance_scaling_matrix_inverse;
+#else
         glsafe(::glPushMatrix());
-        glsafe(::glTranslatef(drain_hole.pos(0), drain_hole.pos(1), drain_hole.pos(2)));
+        glsafe(::glTranslatef(drain_hole.pos.x(), drain_hole.pos.y(), drain_hole.pos.z()));
         glsafe(::glMultMatrixd(instance_scaling_matrix_inverse.data()));
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
         if (vol->is_left_handed())
             glFrontFace(GL_CW);
 
         // Matrices set, we can render the point mark now.
         Eigen::Quaterniond q;
-        q.setFromTwoVectors(Vec3d{0., 0., 1.}, instance_scaling_matrix_inverse * (-drain_hole.normal).cast<double>());
-        Eigen::AngleAxisd aa(q);
-        glsafe(::glRotated(aa.angle() * (180. / M_PI), aa.axis()(0), aa.axis()(1), aa.axis()(2)));
-        glsafe(::glPushMatrix());
+        q.setFromTwoVectors(Vec3d::UnitZ(), instance_scaling_matrix_inverse * (-drain_hole.normal).cast<double>());
+        const Eigen::AngleAxisd aa(q);
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        const Transform3d view_model_matrix = view_matrix * instance_matrix * hole_matrix * Transform3d(aa.toRotationMatrix()) *
+            Geometry::assemble_transform(-drain_hole.height * Vec3d::UnitZ(), Vec3d::Zero(), Vec3d(drain_hole.radius, drain_hole.radius, drain_hole.height + sla::HoleStickOutLength));
+
+        shader->set_uniform("view_model_matrix", view_model_matrix);
+        shader->set_uniform("normal_matrix", (Matrix3d)view_model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose());
+#else
+        glsafe(::glRotated(aa.angle() * (180. / M_PI), aa.axis().x(), aa.axis().y(), aa.axis().z()));
         glsafe(::glTranslated(0., 0., -drain_hole.height));
         glsafe(::glScaled(drain_hole.radius, drain_hole.radius, drain_hole.height + sla::HoleStickOutLength));
-        m_vbo_cylinder.render();
-        glsafe(::glPopMatrix());
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+        m_cylinder.render();
 
         if (vol->is_left_handed())
             glFrontFace(GL_CCW);
-        glsafe(::glPopMatrix());
+
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+            glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
     }
 
-    glsafe(::glPopMatrix());
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+        glsafe(::glPopMatrix());
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
 }
-
-
 
 bool GLGizmoHollow::is_mesh_point_clipped(const Vec3d& point) const
 {
@@ -187,7 +220,7 @@ bool GLGizmoHollow::is_mesh_point_clipped(const Vec3d& point) const
     auto sel_info = m_c->selection_info();
     int active_inst = m_c->selection_info()->get_active_instance();
     const ModelInstance* mi = sel_info->model_object()->instances[active_inst];
-    const Transform3d& trafo = mi->get_transformation().get_matrix();
+    const Transform3d& trafo = mi->get_transformation().get_matrix() * sel_info->model_object()->volumes.front()->get_matrix();
 
     Vec3d transformed_point =  trafo * point;
     transformed_point(2) += sel_info->get_sla_shift();
@@ -206,7 +239,7 @@ bool GLGizmoHollow::unproject_on_mesh(const Vec2d& mouse_pos, std::pair<Vec3f, V
     const Camera& camera = wxGetApp().plater()->get_camera();
     const Selection& selection = m_parent.get_selection();
     const GLVolume* volume = selection.get_volume(*selection.get_volume_idxs().begin());
-    Geometry::Transformation trafo = volume->get_instance_transformation();
+    Geometry::Transformation trafo = volume->get_instance_transformation() * volume->get_volume_transformation();
     trafo.set_offset(trafo.get_offset() + Vec3d(0., 0., m_c->selection_info()->get_sla_shift()));
 
     double clp_dist = m_c->object_clipper()->get_position();
@@ -258,7 +291,7 @@ bool GLGizmoHollow::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_pos
     if (action == SLAGizmoEventType::LeftDown && (shift_down || alt_down || control_down)) {
         if (m_hover_id == -1) {
             if (shift_down || alt_down) {
-                m_selection_rectangle.start_dragging(mouse_position, shift_down ? GLSelectionRectangle::Select : GLSelectionRectangle::Deselect);
+                m_selection_rectangle.start_dragging(mouse_position, shift_down ? GLSelectionRectangle::EState::Select : GLSelectionRectangle::EState::Deselect);
             }
         }
         else {
@@ -324,7 +357,7 @@ bool GLGizmoHollow::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_pos
                  trafo, wxGetApp().plater()->get_camera(), points_inside,
                  m_c->object_clipper()->get_clipping_plane()))
         {
-            if (rectangle_status == GLSelectionRectangle::Deselect)
+            if (rectangle_status == GLSelectionRectangle::EState::Deselect)
                 unselect_point(points_idxs[idx]);
             else
                 select_point(points_idxs[idx]);
@@ -412,19 +445,69 @@ void GLGizmoHollow::delete_selected_points()
     select_point(NoPoints);
 }
 
-void GLGizmoHollow::on_update(const UpdateData& data)
+bool GLGizmoHollow::on_mouse(const wxMouseEvent &mouse_event)
 {
-    sla::DrainHoles& drain_holes = m_c->selection_info()->model_object()->sla_drain_holes;
+    if (mouse_event.Moving()) return false;
+    if (use_grabbers(mouse_event)) return true;
 
-    if (m_hover_id != -1) {
-        std::pair<Vec3f, Vec3f> pos_and_normal;
-        if (! unproject_on_mesh(data.mouse_pos.cast<double>(), pos_and_normal))
-            return;
-        drain_holes[m_hover_id].pos = pos_and_normal.first;
-        drain_holes[m_hover_id].normal = -pos_and_normal.second;
+    // wxCoord == int --> wx/types.h
+    Vec2i mouse_coord(mouse_event.GetX(), mouse_event.GetY());
+    Vec2d mouse_pos = mouse_coord.cast<double>();
+
+    static bool pending_right_up = false;
+    if (mouse_event.LeftDown()) {
+        bool control_down = mouse_event.CmdDown();
+        bool grabber_contains_mouse = (get_hover_id() != -1);
+        if ((!control_down || grabber_contains_mouse) &&
+            gizmo_event(SLAGizmoEventType::LeftDown, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false))
+            // the gizmo got the event and took some action, there is no need
+            // to do anything more
+            return true;
+    } else if (mouse_event.Dragging()) {
+        if (m_parent.get_move_volume_id() != -1)
+            // don't allow dragging objects with the Sla gizmo on
+            return true;
+
+        bool control_down = mouse_event.CmdDown();
+        if (control_down) {
+            // CTRL has been pressed while already dragging -> stop current action
+            if (mouse_event.LeftIsDown())
+                gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), true);
+            else if (mouse_event.RightIsDown()) {
+                pending_right_up = false;
+            }
+        } else if(gizmo_event(SLAGizmoEventType::Dragging, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false)) {
+            // the gizmo got the event and took some action, no need to do
+            // anything more here
+            m_parent.set_as_dirty();
+            return true;
+        }
+    } else if (mouse_event.LeftUp()) {    
+        if (!m_parent.is_mouse_dragging()) {
+            bool control_down = mouse_event.CmdDown();
+            // in case gizmo is selected, we just pass the LeftUp event
+            // and stop processing - neither object moving or selecting is
+            // suppressed in that case
+            gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), control_down);
+            return true;
+        }
+    } else if (mouse_event.RightDown()) {
+        if (m_parent.get_selection().get_object_idx() != -1 &&
+            gizmo_event(SLAGizmoEventType::RightDown, mouse_pos, false, false, false)) {
+            // we need to set the following right up as processed to avoid showing
+            // the context menu if the user release the mouse over the object
+            pending_right_up = true;
+            // event was taken care of by the SlaSupports gizmo
+            return true;
+        }
+    } else if (mouse_event.RightUp()) {
+        if (pending_right_up) {
+            pending_right_up = false;
+            return true;
+        }
     }
+    return false;
 }
-
 
 void GLGizmoHollow::hollow_mesh(bool postpone_error_messages)
 {
@@ -508,20 +591,23 @@ RENDER_AGAIN:
     m_imgui->begin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
 
     // First calculate width of all the texts that are could possibly be shown. We will decide set the dialog width based on that:
-    const float settings_sliders_left =
-      std::max({m_imgui->calc_text_size(m_desc.at("offset")).x,
-               m_imgui->calc_text_size(m_desc.at("quality")).x,
-               m_imgui->calc_text_size(m_desc.at("closing_distance")).x,
-               m_imgui->calc_text_size(m_desc.at("hole_diameter")).x,
-               m_imgui->calc_text_size(m_desc.at("hole_depth")).x})
-           + m_imgui->scaled(1.f);
+    const float clipping_slider_left = std::max(m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x,
+                                                m_imgui->calc_text_size(m_desc.at("reset_direction")).x) + m_imgui->scaled(0.5f);
 
-    const float clipping_slider_left = std::max(m_imgui->calc_text_size(m_desc.at("clipping_of_view")).x, m_imgui->calc_text_size(m_desc.at("reset_direction")).x) + m_imgui->scaled(1.5f);
+    const float settings_sliders_left =
+        std::max(std::max({m_imgui->calc_text_size(m_desc.at("offset")).x,
+                           m_imgui->calc_text_size(m_desc.at("quality")).x,
+                           m_imgui->calc_text_size(m_desc.at("closing_distance")).x,
+                           m_imgui->calc_text_size(m_desc.at("hole_diameter")).x,
+                           m_imgui->calc_text_size(m_desc.at("hole_depth")).x}) + m_imgui->scaled(0.5f), clipping_slider_left);
+
     const float diameter_slider_left = settings_sliders_left; //m_imgui->calc_text_size(m_desc.at("hole_diameter")).x + m_imgui->scaled(1.f);
     const float minimal_slider_width = m_imgui->scaled(4.f);
 
+    const float button_preview_width = m_imgui->calc_button_size(m_desc.at("preview")).x;
+
     float window_width = minimal_slider_width + std::max({settings_sliders_left, clipping_slider_left, diameter_slider_left});
-    window_width = std::max(window_width, m_imgui->calc_text_size(m_desc.at("preview")).x);
+    window_width = std::max(window_width, button_preview_width);
 
     if (m_imgui->button(m_desc["preview"]))
         hollow_mesh();
@@ -541,55 +627,36 @@ RENDER_AGAIN:
     }
 
     m_imgui->disabled_begin(! m_enable_hollowing);
-    float max_tooltip_width = ImGui::GetFontSize() * 20.0f;
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("offset"));
-    ImGui::SameLine(settings_sliders_left);
+    ImGui::SameLine(settings_sliders_left, m_imgui->get_item_spacing().x);
     ImGui::PushItemWidth(window_width - settings_sliders_left);
-    m_imgui->slider_float("   ", &offset, offset_min, offset_max, "%.1f mm");
-    if (ImGui::IsItemHovered()) {
-        ImGui::BeginTooltip();
-        ImGui::PushTextWrapPos(max_tooltip_width);
-        ImGui::TextUnformatted((_utf8(opts[0].second->tooltip)).c_str());
-        ImGui::PopTextWrapPos();
-        ImGui::EndTooltip();
-    }
-    bool slider_clicked = ImGui::IsItemClicked(); // someone clicked the slider
-    bool slider_edited = ImGui::IsItemEdited(); // someone is dragging the slider
-    bool slider_released = ImGui::IsItemDeactivatedAfterEdit(); // someone has just released the slider
+    m_imgui->slider_float("##offset", &offset, offset_min, offset_max, "%.1f mm", 1.0f, true, _L(opts[0].second->tooltip));
+
+    bool slider_clicked = m_imgui->get_last_slider_status().clicked; // someone clicked the slider
+    bool slider_edited =m_imgui->get_last_slider_status().edited; // someone is dragging the slider
+    bool slider_released =m_imgui->get_last_slider_status().deactivated_after_edit; // someone has just released the slider
 
     if (current_mode >= quality_mode) {
         ImGui::AlignTextToFramePadding();
         m_imgui->text(m_desc.at("quality"));
-        ImGui::SameLine(settings_sliders_left);
-        m_imgui->slider_float("    ", &quality, quality_min, quality_max, "%.1f");
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::PushTextWrapPos(max_tooltip_width);
-            ImGui::TextUnformatted((_utf8(opts[1].second->tooltip)).c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndTooltip();
-        }
-        slider_clicked |= ImGui::IsItemClicked();
-        slider_edited |= ImGui::IsItemEdited();
-        slider_released |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(settings_sliders_left, m_imgui->get_item_spacing().x);
+        m_imgui->slider_float("##quality", &quality, quality_min, quality_max, "%.1f", 1.0f, true, _L(opts[1].second->tooltip));
+
+        slider_clicked |= m_imgui->get_last_slider_status().clicked;
+        slider_edited |= m_imgui->get_last_slider_status().edited;
+        slider_released |= m_imgui->get_last_slider_status().deactivated_after_edit;
     }
 
     if (current_mode >= closing_d_mode) {
         ImGui::AlignTextToFramePadding();
         m_imgui->text(m_desc.at("closing_distance"));
-        ImGui::SameLine(settings_sliders_left);
-        m_imgui->slider_float("      ", &closing_d, closing_d_min, closing_d_max, "%.1f mm");
-        if (ImGui::IsItemHovered()) {
-            ImGui::BeginTooltip();
-            ImGui::PushTextWrapPos(max_tooltip_width);
-            ImGui::TextUnformatted((_utf8(opts[2].second->tooltip)).c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndTooltip();
-        }
-        slider_clicked |= ImGui::IsItemClicked();
-        slider_edited |= ImGui::IsItemEdited();
-        slider_released |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SameLine(settings_sliders_left, m_imgui->get_item_spacing().x);
+        m_imgui->slider_float("##closing_distance", &closing_d, closing_d_min, closing_d_max, "%.1f mm", 1.0f, true, _L(opts[2].second->tooltip));
+
+        slider_clicked |= m_imgui->get_last_slider_status().clicked;
+        slider_edited |= m_imgui->get_last_slider_status().edited;
+        slider_released |= m_imgui->get_last_slider_status().deactivated_after_edit;
     }
 
     if (slider_clicked) {
@@ -626,30 +693,30 @@ RENDER_AGAIN:
         m_new_hole_radius = diameter_upper_cap / 2.f;
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc.at("hole_diameter"));
-    ImGui::SameLine(diameter_slider_left);
+    ImGui::SameLine(diameter_slider_left, m_imgui->get_item_spacing().x);
     ImGui::PushItemWidth(window_width - diameter_slider_left);
 
     float diam = 2.f * m_new_hole_radius;
-    m_imgui->slider_float("", &diam, 1.f, 15.f, "%.1f mm", 1.f, false);
+    m_imgui->slider_float("##hole_diameter", &diam, 1.f, 25.f, "%.1f mm", 1.f, false);
     // Let's clamp the value (which could have been entered by keyboard) to a larger range
     // than the slider. This allows entering off-scale values and still protects against
     //complete non-sense.
     diam = std::clamp(diam, 0.1f, diameter_upper_cap);
     m_new_hole_radius = diam / 2.f;
-    bool clicked = ImGui::IsItemClicked();
-    bool edited = ImGui::IsItemEdited();
-    bool deactivated = ImGui::IsItemDeactivatedAfterEdit();
+    bool clicked = m_imgui->get_last_slider_status().clicked;
+    bool edited = m_imgui->get_last_slider_status().edited;
+    bool deactivated = m_imgui->get_last_slider_status().deactivated_after_edit;
 
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc["hole_depth"]);
-    ImGui::SameLine(diameter_slider_left);
-    m_imgui->slider_float("  ", &m_new_hole_height, 0.f, 10.f, "%.1f mm", 1.f, false);
+    ImGui::SameLine(diameter_slider_left, m_imgui->get_item_spacing().x);
+    m_imgui->slider_float("##hole_depth", &m_new_hole_height, 0.f, 10.f, "%.1f mm", 1.f, false);
     // Same as above:
     m_new_hole_height = std::clamp(m_new_hole_height, 0.f, 100.f);
 
-    clicked |= ImGui::IsItemClicked();
-    edited |= ImGui::IsItemEdited();
-    deactivated |= ImGui::IsItemDeactivatedAfterEdit();
+    clicked |= m_imgui->get_last_slider_status().clicked;
+    edited |= m_imgui->get_last_slider_status().edited;
+    deactivated |= m_imgui->get_last_slider_status().deactivated_after_edit;;
 
     // Following is a nasty way to:
     //  - save the initial value of the slider before one starts messing with it
@@ -709,10 +776,10 @@ RENDER_AGAIN:
         }
     }
 
-    ImGui::SameLine(clipping_slider_left);
-    ImGui::PushItemWidth(window_width - clipping_slider_left);
+    ImGui::SameLine(settings_sliders_left, m_imgui->get_item_spacing().x);
+    ImGui::PushItemWidth(window_width - settings_sliders_left);
     float clp_dist = m_c->object_clipper()->get_position();
-    if (m_imgui->slider_float("     ", &clp_dist, 0.f, 1.f, "%.2f"))
+    if (m_imgui->slider_float("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f"))
         m_c->object_clipper()->set_position(clp_dist, true);
 
     // make sure supports are shown/hidden as appropriate
@@ -744,7 +811,7 @@ RENDER_AGAIN:
 
     if (force_refresh)
         m_parent.set_as_dirty();
-    
+
     if (config_changed)
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_FORCE_UPDATE));
 }
@@ -830,6 +897,17 @@ void GLGizmoHollow::on_stop_dragging()
     m_hole_before_drag = Vec3f::Zero();
 }
 
+
+void GLGizmoHollow::on_dragging(const UpdateData &data)
+{
+    assert(m_hover_id != -1);
+    std::pair<Vec3f, Vec3f> pos_and_normal;
+    if (!unproject_on_mesh(data.mouse_pos.cast<double>(), pos_and_normal))
+        return;
+    sla::DrainHoles &drain_holes =  m_c->selection_info()->model_object()->sla_drain_holes;
+    drain_holes[m_hover_id].pos    = pos_and_normal.first;
+    drain_holes[m_hover_id].normal = -pos_and_normal.second;
+}
 
 
 void GLGizmoHollow::on_load(cereal::BinaryInputArchive& ar)

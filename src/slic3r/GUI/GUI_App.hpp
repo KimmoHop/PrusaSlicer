@@ -32,6 +32,7 @@ class PresetUpdater;
 class ModelObject;
 class PrintHostJobQueue;
 class Model;
+class AppUpdater;
 
 namespace GUI{
 
@@ -53,6 +54,7 @@ enum FileType
 {
     FT_STL,
     FT_OBJ,
+    FT_OBJECT,
     FT_AMF,
     FT_3MF,
     FT_GCODE,
@@ -66,19 +68,22 @@ enum FileType
     FT_TEX,
 
     FT_SL1,
-	// Workaround for OSX file picker, for some reason it always saves with the 1st extension.
- 	FT_SL1S,
 
     FT_SIZE,
 };
 
-extern wxString file_wildcards(FileType file_type, const std::string &custom_extension = std::string());
+#if ENABLE_ALTERNATIVE_FILE_WILDCARDS_GENERATOR
+extern wxString file_wildcards(FileType file_type);
+#else
+extern wxString file_wildcards(FileType file_type, const std::string &custom_extension = std::string{});
+#endif // ENABLE_ALTERNATIVE_FILE_WILDCARDS_GENERATOR
 
 enum ConfigMenuIDs {
     ConfigMenuWizard,
     ConfigMenuSnapshots,
     ConfigMenuTakeSnapshot,
-    ConfigMenuUpdate,
+    ConfigMenuUpdateConf,
+    ConfigMenuUpdateApp,
     ConfigMenuDesktopIntegration,
     ConfigMenuPreferences,
     ConfigMenuModeSimple,
@@ -125,6 +130,7 @@ private:
 #ifdef _WIN32
     wxColour        m_color_highlight_label_default;
     wxColour        m_color_hovered_btn_label;
+    wxColour        m_color_default_btn_label;
     wxColour        m_color_highlight_default;
     wxColour        m_color_selected_btn_bg;
     bool            m_force_colors_update { false };
@@ -134,6 +140,7 @@ private:
     wxFont		    m_bold_font;
 	wxFont			m_normal_font;
 	wxFont			m_code_font;
+    wxFont		    m_link_font;
 
     int             m_em_unit; // width of a "m"-symbol in pixels for current system font
                                // Note: for 100% Scale m_em_unit = 10 -> it's a good enough coefficient for a size setting of controls
@@ -151,6 +158,7 @@ private:
     std::unique_ptr<ImGuiWrapper> m_imgui;
     std::unique_ptr<PrintHostJobQueue> m_printhost_job_queue;
 	std::unique_ptr <OtherInstanceMessageHandler> m_other_instance_message_handler;
+    std::unique_ptr <AppUpdater> m_app_updater;
     std::unique_ptr <wxSingleInstanceChecker> m_single_instance_checker;
     std::string m_instance_hash_string;
 	size_t m_instance_hash_int;
@@ -166,12 +174,15 @@ public:
     bool is_editor() const { return m_app_mode == EAppMode::Editor; }
     bool is_gcode_viewer() const { return m_app_mode == EAppMode::GCodeViewer; }
     bool is_recreating_gui() const { return m_is_recreating_gui; }
+    std::string logo_name() const { return is_editor() ? "PrusaSlicer" : "PrusaSlicer-gcodeviewer"; }
 
     // To be called after the GUI is fully built up.
     // Process command line parameters cached in this->init_params,
     // load configs, STLs etc.
     void            post_init();
-    static std::string get_gl_info(bool format_as_html, bool extensions);
+    // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
+    // Otherwise HTML formatted for the system info dialog.
+    static std::string get_gl_info(bool for_github);
     wxGLContext*    init_glcontext(wxGLCanvas& canvas);
     bool            init_opengl();
 
@@ -207,12 +218,16 @@ public:
     const wxColour& get_color_hovered_btn_label() { return m_color_hovered_btn_label; }
     const wxColour& get_color_selected_btn_bg() { return m_color_selected_btn_bg; }
     void            force_colors_update();
+#ifdef _MSW_DARK_MODE
+    void            force_menu_update();
+#endif //_MSW_DARK_MODE
 #endif
 
     const wxFont&   small_font()            { return m_small_font; }
     const wxFont&   bold_font()             { return m_bold_font; }
     const wxFont&   normal_font()           { return m_normal_font; }
     const wxFont&   code_font()             { return m_code_font; }
+    const wxFont&   link_font()             { return m_link_font; }
     int             em_unit() const         { return m_em_unit; }
     bool            tabs_as_menu() const;
     wxSize          get_min_size() const;
@@ -244,7 +259,7 @@ public:
     bool            has_unsaved_preset_changes() const;
     bool            has_current_preset_changes() const;
     void            update_saved_preset_from_current_preset();
-    std::vector<std::pair<unsigned int, std::string>> get_selected_presets() const;
+    std::vector<const PresetCollection*> get_active_preset_collections() const;
     bool            check_and_save_current_preset_changes(const wxString& caption, const wxString& header, bool remember_choice = true, bool use_dont_save_insted_of_discard = false);
     void            apply_keeped_preset_modifications();
     bool            check_and_keep_current_preset_changes(const wxString& caption, const wxString& header, int action_buttons, bool* postponed_apply_of_keeped_changes = nullptr);
@@ -258,11 +273,12 @@ public:
     wxString 		current_language_code_safe() const;
     bool            is_localized() const { return m_wxLocale->GetLocale() != "English"; }
 
-    void            open_preferences(size_t open_on_tab = 0);
+    void            open_preferences(const std::string& highlight_option = std::string(), const std::string& tab_name = std::string());
 
     virtual bool OnExceptionInMainLoop() override;
     // Calls wxLaunchDefaultBrowser if user confirms in dialog.
-    bool            open_browser_with_warning_dialog(const wxString& url, int flags = 0);
+    // Add "Rememeber my choice" checkbox to question dialog, when it is forced or a "suppress_hyperlinks" option has empty value
+    bool            open_browser_with_warning_dialog(const wxString& url, wxWindow* parent = nullptr, bool force_remember_choice = true, int flags = 0);
 #ifdef __APPLE__
     void            OSXStoreOpenFiles(const wxArrayString &files) override;
     // wxWidgets override to get an event on open files.
@@ -275,6 +291,7 @@ public:
     ObjectList*          obj_list();
     ObjectLayers*        obj_layers();
     Plater*              plater();
+    const Plater*        plater() const;
     Model&      		 model();
     NotificationManager * notification_manager();
 
@@ -309,6 +326,7 @@ public:
     PrintHostJobQueue& printhost_job_queue() { return *m_printhost_job_queue.get(); }
 
     void            open_web_page_localized(const std::string &http_address);
+    bool            may_switch_to_SLA_preset(const wxString& caption);
     bool            run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage start_page = ConfigWizard::SP_WELCOME);
     void            show_desktop_integration_dialog();
 
@@ -322,6 +340,7 @@ public:
 
     bool is_gl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr.get_gl_info().is_version_greater_or_equal_to(major, minor); }
     bool is_glsl_version_greater_or_equal_to(unsigned int major, unsigned int minor) const { return m_opengl_mgr.get_gl_info().is_glsl_version_greater_or_equal_to(major, minor); }
+    int  GetSingleChoiceIndex(const wxString& message, const wxString& caption, const wxArrayString& choices, int initialSelection);
 
 #ifdef __WXMSW__
     void            associate_3mf_files();
@@ -332,13 +351,25 @@ public:
 private:
     bool            on_init_inner();
 	void            init_app_config();
+    // returns old config path to copy from if such exists,
+    // returns an empty string if such config path does not exists or if it cannot be loaded.
+    std::string     check_older_app_config(Semver current_version, bool backup);
     void            window_pos_save(wxTopLevelWindow* window, const std::string &name);
     void            window_pos_restore(wxTopLevelWindow* window, const std::string &name, bool default_maximized = false);
     void            window_pos_sanitize(wxTopLevelWindow* window);
     bool            select_language();
 
     bool            config_wizard_startup();
-	void            check_updates(const bool verbose);
+    // Returns true if the configuration is fine. 
+    // Returns true if the configuration is not compatible and the user decided to rather close the slicer instead of reconfiguring.
+	bool            check_updates(const bool verbose);
+    void            on_version_read(wxCommandEvent& evt);
+    // if the data from version file are already downloaded, shows dialogs to start download of new version of app
+    void            app_updater(bool from_user);
+    // inititate read of version file online in separate thread
+    void            app_version_check(bool from_user);
+
+    bool            m_datadir_redefined { false }; 
 };
 
 DECLARE_APP(GUI_App)

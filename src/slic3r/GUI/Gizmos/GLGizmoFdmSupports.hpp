@@ -11,7 +11,7 @@ public:
     GLGizmoFdmSupports(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
         : GLGizmoPainterBase(parent, icon_filename, sprite_id) {}
 
-    void render_painter_gizmo() const override;
+    void render_painter_gizmo() override;
 
 protected:
     void on_render_input_window(float x, float y, float bottom_limit) override;
@@ -21,6 +21,8 @@ protected:
 
     std::string get_gizmo_entering_text() const override { return _u8L("Entering Paint-on supports"); }
     std::string get_gizmo_leaving_text() const override { return _u8L("Leaving Paint-on supports"); }
+    std::string get_action_snapshot_name() override { return _u8L("Paint-on supports editing"); }
+
 
 private:
     bool on_init() override;
@@ -33,7 +35,6 @@ private:
     PainterGizmoType get_painter_type() const override;
 
     void select_facets_by_angle(float threshold, bool block);
-    float m_angle_threshold_deg = 0.f;
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.

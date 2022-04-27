@@ -188,6 +188,77 @@ void PresetBundle::setup_directories()
     }
 }
 
+// recursively copy all files and dirs in from_dir to to_dir
+static void copy_dir(const boost::filesystem::path& from_dir, const boost::filesystem::path& to_dir)
+{
+    if(!boost::filesystem::is_directory(from_dir))
+        return;
+    // i assume to_dir.parent surely exists
+    if (!boost::filesystem::is_directory(to_dir))
+        boost::filesystem::create_directory(to_dir);
+    for (auto& dir_entry : boost::filesystem::directory_iterator(from_dir)) {
+        if (!boost::filesystem::is_directory(dir_entry.path())) {
+            std::string em;
+            CopyFileResult cfr = copy_file(dir_entry.path().string(), (to_dir / dir_entry.path().filename()).string(), em, false);
+            if (cfr != SUCCESS) {
+                BOOST_LOG_TRIVIAL(error) << "Error when copying files from " << from_dir << " to " << to_dir << ": " << em;
+            }
+        } else {
+            copy_dir(dir_entry.path(), to_dir / dir_entry.path().filename());
+        }
+    }
+}
+
+// Import newer configuration from alternate PrusaSlicer configuration directory.
+// AppConfig from the alternate location is already loaded.
+// User profiles are being merged (old files are not being deleted),
+// while old vendors and cache folders are being deleted before newer are copied.
+void PresetBundle::import_newer_configs(const std::string& from)
+{
+    boost::filesystem::path data_dir = boost::filesystem::path(Slic3r::data_dir());
+    // Clean-up vendors from the target directory, as the existing vendors will not be referenced
+    // by the copied PrusaSlicer.ini
+    try {
+        boost::filesystem::remove_all(data_dir / "cache");
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "Error deleting old cache " << (data_dir / "cache").string() << ": " << ex.what();
+    }
+    try {
+        boost::filesystem::remove_all(data_dir / "vendor");
+    } catch (const std::exception &ex) {
+        BOOST_LOG_TRIVIAL(error) << "Error deleting old vendors " << (data_dir / "vendor").string() << ": " << ex.what();
+    }
+    // list of searched paths based on current directory system in setup_directories()
+    // do not copy cache and snapshots
+    boost::filesystem::path from_data_dir = boost::filesystem::path(from);
+    std::initializer_list<boost::filesystem::path> from_dirs= {
+        from_data_dir / "cache",
+        from_data_dir / "vendor",
+        from_data_dir / "shapes",
+#ifdef SLIC3R_PROFILE_USE_PRESETS_SUBDIR
+        // Store the print/filament/printer presets into a "presets" directory.
+        data_dir / "presets" / "print",
+        data_dir / "presets" / "filament",
+        data_dir / "presets" / "sla_print",
+        data_dir / "presets" / "sla_material",
+        data_dir / "presets" / "printer",
+        data_dir / "presets" / "physical_printer"
+#else
+        // Store the print/filament/printer presets at the same location as the upstream Slic3r.
+        from_data_dir / "print",
+        from_data_dir / "filament",
+        from_data_dir / "sla_print",
+        from_data_dir / "sla_material",
+        from_data_dir / "printer",
+        from_data_dir / "physical_printer"
+#endif
+    };
+    // copy recursively all files
+    for (const boost::filesystem::path& from_dir : from_dirs) {
+        copy_dir(from_dir, data_dir / from_dir.filename());
+    }
+}
+
 PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, ForwardCompatibilitySubstitutionRule substitution_rule, 
                                                       const PresetPreferences& preferred_selection/* = PresetPreferences()*/)
 {
@@ -196,7 +267,7 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
     std::string errors_cummulative;
     std::tie(substitutions, errors_cummulative) = this->load_system_presets(substitution_rule);
 
-    const std::string dir_user_presets = data_dir()
+    const std::string& dir_user_presets = data_dir()
 #ifdef SLIC3R_PROFILE_USE_PRESETS_SUBDIR
         // Store the print/filament/printer presets into a "presets" directory.
         + "/presets"
@@ -500,13 +571,17 @@ void PresetBundle::load_selections(AppConfig &config, const PresetPreferences& p
         // Only run this code if just a filament / SLA material was installed by Config Wizard for an active Printer.
         auto printer_technology = printers.get_selected_preset().printer_technology();
         if (printer_technology == ptFFF && ! preferred_selection.filament.empty()) {
-            if (auto it = filaments.find_preset_internal(preferred_selection.filament); it != filaments.end() && it->is_visible) {
-                filaments.select_preset_by_name_strict(preferred_selection.filament);
+            std::string preferred_preset_name = get_preset_name_by_alias(Preset::Type::TYPE_FILAMENT, preferred_selection.filament);
+            if (auto it = filaments.find_preset_internal(preferred_preset_name); 
+                it != filaments.end() && it->is_visible && it->is_compatible) {
+                filaments.select_preset_by_name_strict(preferred_preset_name);
                 this->filament_presets.front() = filaments.get_selected_preset_name();
             }
         } else if (printer_technology == ptSLA && ! preferred_selection.sla_material.empty()) {
-            if (auto it = sla_materials.find_preset_internal(preferred_selection.sla_material); it != sla_materials.end() && it->is_visible)
-                sla_materials.select_preset_by_name_strict(preferred_selection.sla_material);
+            std::string preferred_preset_name = get_preset_name_by_alias(Preset::Type::TYPE_SLA_MATERIAL, preferred_selection.sla_material);
+            if (auto it = sla_materials.find_preset_internal(preferred_preset_name);
+                it != sla_materials.end() && it->is_visible && it->is_compatible)
+                sla_materials.select_preset_by_name_strict(preferred_preset_name);
         }
     }
 
@@ -1176,11 +1251,13 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
     // 1) Read the complete config file into a boost::property_tree.
     namespace pt = boost::property_tree;
     pt::ptree tree;
-    boost::nowide::ifstream ifs(path);
-    try {
-        pt::read_ini(ifs, tree);
-    } catch (const boost::property_tree::ini_parser::ini_parser_error &err) {
-        throw Slic3r::RuntimeError(format("Failed loading config bundle \"%1%\"\nError: \"%2%\" at line %3%", path, err.message(), err.line()).c_str());
+    {
+        boost::nowide::ifstream ifs(path);
+        try {
+            pt::read_ini(ifs, tree);
+        } catch (const boost::property_tree::ini_parser::ini_parser_error &err) {
+            throw Slic3r::RuntimeError(format("Failed loading config bundle \"%1%\"\nError: \"%2%\" at line %3%", path, err.message(), err.line()).c_str());
+        }
     }
 
     const VendorProfile *vendor_profile = nullptr;

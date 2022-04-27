@@ -35,11 +35,17 @@ namespace FillAdaptive {
     struct Octree;
     struct OctreeDeleter;
     using OctreePtr = std::unique_ptr<Octree, OctreeDeleter>;
-};
+}; // namespace FillAdaptive
+
+namespace FillLightning {
+    class Generator;
+    struct GeneratorDeleter;
+    using GeneratorPtr = std::unique_ptr<Generator, GeneratorDeleter>;
+}; // namespace FillLightning
 
 // Print step IDs for keeping track of the print state.
 // The Print steps are applied in this order.
-enum PrintStep {
+enum PrintStep : unsigned int {
     psWipeTower,
     // Ordering of the tools on PrintObjects for a multi-material print.
     // psToolOrdering is a synonym to psWipeTower, as the Wipe Tower calculates and modifies the ToolOrdering,
@@ -53,7 +59,7 @@ enum PrintStep {
     psCount,
 };
 
-enum PrintObjectStep {
+enum PrintObjectStep : unsigned int {
     posSlice, posPerimeters, posPrepareInfill,
     posInfill, posIroning, posSupportMaterial, posCount,
 };
@@ -300,8 +306,8 @@ public:
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
     SupportLayer*   get_support_layer(int idx) { return m_support_layers[idx]; }
-    SupportLayer*   add_support_layer(int id, coordf_t height, coordf_t print_z);
-    SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::iterator pos, size_t id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    SupportLayer*   add_support_layer(int id, int interface_id, coordf_t height, coordf_t print_z);
+    SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::iterator pos, size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
     void            delete_support_layer(int idx);
     
     // Initialize the layer_height_profile from the model_object's layer_height_profile, from model_object's layer height table, or from slicing parameters.
@@ -344,10 +350,16 @@ public:
 private:
     // to be called from Print only.
     friend class Print;
+    friend class PrintBaseWithState<PrintStep, psCount>;
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
-	~PrintObject() { if (m_shared_regions && -- m_shared_regions->m_ref_cnt == 0) delete m_shared_regions; }
- 
+    ~PrintObject() override {
+        if (m_shared_regions && --m_shared_regions->m_ref_cnt == 0)
+            delete m_shared_regions;
+        clear_layers();
+        clear_support_layers();
+    }
+
     void                    config_apply(const ConfigBase &other, bool ignore_nonexistent = false) { m_config.apply(other, ignore_nonexistent); }
     void                    config_apply_only(const ConfigBase &other, const t_config_option_keys &keys, bool ignore_nonexistent = false) { m_config.apply_only(other, keys, ignore_nonexistent); }
     PrintBase::ApplyStatus  set_instances(PrintInstances &&instances);
@@ -382,6 +394,7 @@ private:
     void combine_infill();
     void _generate_support_material();
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data();
+    FillLightning::GeneratorPtr prepare_lightning_infill_data();
 
     // XYZ in scaled coordinates
     Vec3crd									m_size;
@@ -455,6 +468,10 @@ struct PrintStatistics
     double                          total_weight;
     double                          total_wipe_tower_cost;
     double                          total_wipe_tower_filament;
+    std::vector<unsigned int>       printing_extruders;
+    unsigned int                    initial_extruder_id;
+    std::string                     initial_filament_type;
+    std::string                     printing_filament_types;
     std::map<size_t, double>        filament_stats;
 
     // Config with the filled in print statistics.
@@ -472,7 +489,11 @@ struct PrintStatistics
         total_weight           = 0.;
         total_wipe_tower_cost  = 0.;
         total_wipe_tower_filament = 0.;
+        initial_extruder_id    = 0;
+        initial_filament_type.clear();
+        printing_filament_types.clear();
         filament_stats.clear();
+        printing_extruders.clear();
     }
 };
 
@@ -517,11 +538,13 @@ public:
     std::vector<ObjectID> print_object_ids() const override;
 
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config) override;
-
+    void                set_task(const TaskParams &params) override { PrintBaseWithState<PrintStep, psCount>::set_task_impl(params, m_objects); }
     void                process() override;
+    void                finalize() override { PrintBaseWithState<PrintStep, psCount>::finalize_impl(m_objects); }
+
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
-    std::string         export_gcode(const std::string& path_template, GCodeProcessor::Result* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
 
     // methods for handling state
     bool                is_step_done(PrintStep step) const { return Inherited::is_step_done(step); }

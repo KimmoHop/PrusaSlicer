@@ -33,6 +33,7 @@ option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
 option(SLIC3R_MSVC_PDB          "Generate PDB files on MSVC in Release mode" 1)
 option(SLIC3R_PERL_XS           "Compile XS Perl module and enable Perl unit and integration tests" 0)
 option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
+option(SLIC3R_UBSAN             "Enable UBSan on Clang and GCC" 0)
 # If SLIC3R_FHS is 1 -> SLIC3R_DESKTOP_INTEGRATION is always 0, othrewise variable.
 CMAKE_DEPENDENT_OPTION(SLIC3R_DESKTOP_INTEGRATION "Allow perfoming desktop integration during runtime" 1 "NOT SLIC3R_FHS" 0)
 
@@ -239,6 +240,11 @@ if (NOT MSVC AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMP
         add_compile_options(-Wno-deprecated-declarations)
     endif()
 
+    # Clang reports misleading indentation for some IF blocks because of mixing tabs with spaces.
+    if("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang")
+        add_compile_options(-Wno-misleading-indentation)
+    endif()
+
     #GCC generates loads of -Wunknown-pragmas when compiling igl. The fix is not easy due to a bug in gcc, see
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=66943 or
     # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=53431
@@ -263,6 +269,32 @@ if (SLIC3R_ASAN)
 
     if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
         set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lasan")
+    endif ()
+endif ()
+
+if (SLIC3R_UBSAN)
+    # Stacktrace for every report is enabled by default. It can be disabled by running PrusaSlicer with "UBSAN_OPTIONS=print_stacktrace=0".
+
+    # Define macro SLIC3R_UBSAN to allow detection in the source code if this sanitizer is enabled.
+    add_compile_definitions(SLIC3R_UBSAN)
+
+    # Clang supports much more useful checks than GCC, so when Clang is detected, another checks will be enabled.
+    # List of what GCC is checking: https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html
+    # List of what Clang is checking: https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html
+    if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
+        set(_ubsan_flags "-fsanitize=undefined,integer")
+    else ()
+        set(_ubsan_flags "-fsanitize=undefined")
+    endif ()
+
+    add_compile_options(${_ubsan_flags} -fno-omit-frame-pointer)
+
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} ${_ubsan_flags}")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} ${_ubsan_flags}")
+    set(CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} ${_ubsan_flags}")
+
+    if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lubsan")
     endif ()
 endif ()
 
@@ -382,6 +414,7 @@ if(SLIC3R_STATIC)
 endif()
 set(TBB_DEBUG 1)
 find_package(TBB REQUIRED)
+slic3r_remap_configs(TBB::tbb RelWithDebInfo Release)
 # include_directories(${TBB_INCLUDE_DIRS})
 # add_definitions(${TBB_DEFINITIONS})
 # if(MSVC)
@@ -437,18 +470,7 @@ include_directories(BEFORE SYSTEM ${EIGEN3_INCLUDE_DIR})
 # Find expat or use bundled version
 # Always use the system libexpat on Linux.
 
-find_package(EXPAT)
-
-if (NOT EXPAT_FOUND)
-    add_library(expat STATIC
-        ${LIBDIR}/expat/xmlparse.c
-        ${LIBDIR}/expat/xmlrole.c
-        ${LIBDIR}/expat/xmltok.c
-    )
-    set(EXPAT_FOUND 1)
-    set(EXPAT_INCLUDE_DIRS ${LIBDIR}/expat/)
-    set(EXPAT_LIBRARIES expat)
-endif ()
+find_package(EXPAT REQUIRED)
 
 find_package(PNG REQUIRED)
 
@@ -461,33 +483,73 @@ if (SLIC3R_STATIC AND NOT SLIC3R_STATIC_EXCLUDE_GLEW)
     set(GLEW_VERBOSE ON)
 endif()
 
-find_package(GLEW)
-if (NOT TARGET GLEW::GLEW)
-    message(STATUS "GLEW not found, using bundled version.")
-    add_library(glew STATIC ${LIBDIR}/glew/src/glew.c)
-    set(GLEW_FOUND TRUE)
-    set(GLEW_INCLUDE_DIRS ${LIBDIR}/glew/include/)
-    target_compile_definitions(glew PUBLIC GLEW_STATIC)
-    target_include_directories(glew PUBLIC ${GLEW_INCLUDE_DIRS})
-    add_library(GLEW::GLEW ALIAS glew)
-endif ()
+find_package(GLEW REQUIRED)
 
 # Find the Cereal serialization library
 find_package(cereal REQUIRED)
+add_library(libcereal INTERFACE)
+if (NOT TARGET cereal::cereal)
+    target_link_libraries(libcereal INTERFACE cereal)
+else()
+    target_link_libraries(libcereal INTERFACE cereal::cereal)
+endif()
 
 # l10n
 set(L10N_DIR "${SLIC3R_RESOURCES_DIR}/localization")
 add_custom_target(gettext_make_pot
-    COMMAND xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --debug
+    COMMAND xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --debug --boost
         -f "${L10N_DIR}/list.txt"
         -o "${L10N_DIR}/PrusaSlicer.pot"
     COMMAND hintsToPot ${SLIC3R_RESOURCES_DIR} ${L10N_DIR}
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Generate pot file from strings in the source tree"
 )
+
+add_custom_target(gettext_merge_community_po_with_pot
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Merge community po with new generated pot file"
+)
+file(GLOB L10N_PO_FILES "${L10N_DIR}/*/PrusaSlicer*.po")
+# list of names of directories, which are licalized by PS internally
+list(APPEND PS_L10N_DIRS "cs" "de" "es" "fr" "it" "ja" "pl")
+foreach(po_file ${L10N_PO_FILES})
+    GET_FILENAME_COMPONENT(po_dir "${po_file}" DIRECTORY)
+    GET_FILENAME_COMPONENT(po_dir_name "${po_dir}" NAME)
+    list(FIND PS_L10N_DIRS ${po_dir_name} found_dir_id)
+    # found_dir_id==-1 means that po_dir_name wasn't found in PS_L10N_DIRS
+    if(found_dir_id LESS 0)
+        add_custom_command(
+            TARGET gettext_merge_community_po_with_pot PRE_BUILD
+            COMMAND msgmerge -N -o ${po_file} ${po_file} "${L10N_DIR}/PrusaSlicer.pot"
+            # delete obsolete lines from resulting PO to avoid conflicts after a merging of it with wxWidgets.po
+            COMMAND msgattrib --no-obsolete -o ${po_file} ${po_file}
+            DEPENDS ${po_file}
+        )
+    endif()
+endforeach()
+
+add_custom_target(gettext_concat_wx_po_with_po
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Concatenate and merge wxWidgets localization po with PrusaSlicer po file"
+)
+file(GLOB L10N_PO_FILES "${L10N_DIR}/*/PrusaSlicer*.po")
+foreach(po_file ${L10N_PO_FILES})
+    GET_FILENAME_COMPONENT(po_dir "${po_file}" DIRECTORY)
+    GET_FILENAME_COMPONENT(po_dir_name "${po_dir}" NAME)
+    SET(wx_po_file "${L10N_DIR}/wx_locale/${po_dir_name}.po")
+    #SET(po_new_file "${po_dir}/PrusaSlicer_.po")
+    add_custom_command(
+        TARGET gettext_concat_wx_po_with_po PRE_BUILD
+        COMMAND msgcat --use-first -o ${po_file} ${po_file} ${wx_po_file}
+        # delete obsolete lines from resulting PO
+        COMMAND msgattrib --no-obsolete -o ${po_file} ${po_file}
+        DEPENDS ${po_file}
+    )
+endforeach()
+
 add_custom_target(gettext_po_to_mo
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
-    COMMENT "Generate localization po files (binary) from mo files (texts)"
+    COMMENT "Generate localization mo files (binary) from po files (texts)"
 )
 file(GLOB L10N_PO_FILES "${L10N_DIR}/*/PrusaSlicer*.po")
 foreach(po_file ${L10N_PO_FILES})
@@ -495,7 +557,8 @@ foreach(po_file ${L10N_PO_FILES})
     SET(mo_file "${po_dir}/PrusaSlicer.mo")
     add_custom_command(
         TARGET gettext_po_to_mo PRE_BUILD
-        COMMAND msgfmt ARGS -o ${mo_file} ${po_file}
+        COMMAND msgfmt ARGS --check-format -o ${mo_file} ${po_file}
+        #COMMAND msgfmt ARGS --check-compatibility -o ${mo_file} ${po_file}
         DEPENDS ${po_file}
     )
 endforeach()

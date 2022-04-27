@@ -16,7 +16,7 @@ namespace Slic3r {
 class ConfigOption;
 
 namespace GUI {
-
+class Selection;
 enum class SLAGizmoEventType : unsigned char;
 
 class GLGizmoSlaSupports : public GLGizmoBase
@@ -57,7 +57,7 @@ private:
 public:
     GLGizmoSlaSupports(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
     virtual ~GLGizmoSlaSupports() = default;
-    void set_sla_support_data(ModelObject* model_object, const Selection& selection);
+    void data_changed() override;
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
     void delete_selected_points(bool force = false);
     //ClippingPlane get_sla_clipping_plane() const;
@@ -68,14 +68,21 @@ public:
     void reslice_SLA_supports(bool postpone_error_messages = false) const;
 
     bool wants_enter_leave_snapshots() const override { return true; }
-
+    std::string get_gizmo_entering_text() const override { return _u8L("Entering SLA support points"); }
+    std::string get_gizmo_leaving_text() const override { return _u8L("Leaving SLA support points"); }
+        
+    /// <summary>
+    /// Process mouse event
+    /// </summary>
+    /// <param name="mouse_event">Keep information about mouse click</param>
+    /// <returns>Return True when use the information otherwise False.</returns>
+    bool on_mouse(const wxMouseEvent &mouse_event) override;
 private:
     bool on_init() override;
-    void on_update(const UpdateData& data) override;
     void on_render() override;
     void on_render_for_picking() override;
 
-    void render_points(const Selection& selection, bool picking = false) const;
+    void render_points(const Selection& selection, bool picking = false);
     bool unsaved_changes() const;
 
     bool m_lock_unique_islands = false;
@@ -89,6 +96,10 @@ private:
     std::vector<sla::SupportPoint> m_normal_cache; // to restore after discarding changes or undo/redo
     ObjectID m_old_mo_id;
 
+    GLModel m_cone;
+    GLModel m_cylinder;
+    GLModel m_sphere;
+
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
     std::map<std::string, wxString> m_desc;
@@ -101,7 +112,6 @@ private:
 
     std::vector<const ConfigOption*> get_config_options(const std::vector<std::string>& keys) const;
     bool is_mesh_point_clipped(const Vec3d& point) const;
-    bool is_point_in_hole(const Vec3f& pt) const;
     //void find_intersecting_facets(const igl::AABB<Eigen::MatrixXf, 3>* aabb, const Vec3f& normal, double offset, std::vector<unsigned int>& out) const;
 
     // Methods that do the model_object and editing cache synchronization,
@@ -124,13 +134,13 @@ private:
 protected:
     void on_set_state() override;
     void on_set_hover_id() override
-
     {
         if (! m_editing_mode || (int)m_editing_cache.size() <= m_hover_id)
             m_hover_id = -1;
     }
     void on_start_dragging() override;
     void on_stop_dragging() override;
+    void on_dragging(const UpdateData &data) override;
     void on_render_input_window(float x, float y, float bottom_limit) override;
 
     std::string on_get_name() const override;

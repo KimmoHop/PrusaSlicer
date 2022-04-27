@@ -14,7 +14,7 @@ if (TARGET OpenVDB::openvdb)
     set(OpenVDBUtils_SOURCES OpenVDBUtils.cpp OpenVDBUtils.hpp)
 endif()
 
-add_library(libslic3r STATIC
+set(SLIC3R_SOURCES
     pchheader.cpp
     pchheader.hpp
     BoundingBox.cpp
@@ -23,10 +23,14 @@ add_library(libslic3r STATIC
     BridgeDetector.hpp
     Brim.cpp
     Brim.hpp
+    BuildVolume.cpp
+    BuildVolume.hpp
     clipper.cpp
     clipper.hpp
     ClipperUtils.cpp
     ClipperUtils.hpp
+    Color.cpp
+    Color.hpp
     Config.cpp
     Config.hpp
     EdgeGrid.cpp
@@ -65,6 +69,16 @@ add_library(libslic3r STATIC
     Fill/FillPlanePath.hpp
     Fill/FillLine.cpp
     Fill/FillLine.hpp
+    Fill/FillLightning.cpp
+    Fill/FillLightning.hpp
+    Fill/Lightning/DistanceField.cpp
+    Fill/Lightning/DistanceField.hpp
+    Fill/Lightning/Generator.cpp
+    Fill/Lightning/Generator.hpp
+    Fill/Lightning/Layer.cpp
+    Fill/Lightning/Layer.hpp
+    Fill/Lightning/TreeNode.cpp
+    Fill/Lightning/TreeNode.hpp
     Fill/FillRectilinear.cpp
     Fill/FillRectilinear.hpp
     Flow.cpp
@@ -80,12 +94,26 @@ add_library(libslic3r STATIC
     Format/objparser.hpp
     Format/STL.cpp
     Format/STL.hpp
+    Format/SLAArchiveWriter.hpp
+    Format/SLAArchiveWriter.cpp
+    Format/SLAArchiveReader.hpp
+    Format/SLAArchiveReader.cpp
+    Format/ZipperArchiveImport.hpp
+    Format/ZipperArchiveImport.cpp
     Format/SL1.hpp
     Format/SL1.cpp
+    Format/SL1_SVG.hpp
+    Format/SL1_SVG.cpp
+    Format/pwmx.hpp
+    Format/pwmx.cpp
     GCode/ThumbnailData.cpp
     GCode/ThumbnailData.hpp
+    GCode/Thumbnails.cpp
+    GCode/Thumbnails.hpp
     GCode/CoolingBuffer.cpp
     GCode/CoolingBuffer.hpp
+    GCode/FindReplace.cpp
+    GCode/FindReplace.hpp
     GCode/PostProcessor.cpp
     GCode/PostProcessor.hpp
 #    GCode/PressureEqualizer.cpp
@@ -114,6 +142,18 @@ add_library(libslic3r STATIC
     GCodeWriter.hpp
     Geometry.cpp
     Geometry.hpp
+    Geometry/Bicubic.hpp
+    Geometry/Circle.cpp
+    Geometry/Circle.hpp
+    Geometry/ConvexHull.cpp
+    Geometry/ConvexHull.hpp
+    Geometry/Curves.hpp
+    Geometry/MedialAxis.cpp
+    Geometry/MedialAxis.hpp
+    Geometry/Voronoi.hpp
+    Geometry/VoronoiOffset.cpp
+    Geometry/VoronoiOffset.hpp
+    Geometry/VoronoiVisualUtils.hpp
     Int128.hpp
     KDTreeIndirect.hpp
     Layer.cpp
@@ -191,6 +231,8 @@ add_library(libslic3r STATIC
     SlicesToTriangleMesh.cpp
     SlicingAdaptive.cpp
     SlicingAdaptive.hpp
+    Subdivide.cpp
+    Subdivide.hpp
     SupportMaterial.cpp
     SupportMaterial.hpp
     Surface.cpp
@@ -218,18 +260,12 @@ add_library(libslic3r STATIC
     TriangleSelector.cpp
     TriangleSelector.hpp
     MTUtils.hpp
-    VoronoiOffset.cpp
-    VoronoiOffset.hpp
-    VoronoiVisualUtils.hpp
     Zipper.hpp
     Zipper.cpp
     MinAreaBoundingBox.hpp
     MinAreaBoundingBox.cpp
     miniz_extension.hpp
     miniz_extension.cpp
-    SimplifyMesh.hpp
-    SimplifyMeshImpl.hpp
-    SimplifyMesh.cpp
     MarchingSquares.hpp
     Execution/Execution.hpp
     Execution/ExecutionSeq.hpp
@@ -275,6 +311,14 @@ add_library(libslic3r STATIC
     SLA/ReprojectPointsOnMesh.hpp
 )
 
+add_library(libslic3r STATIC ${SLIC3R_SOURCES})
+
+foreach(_source IN ITEMS ${SLIC3R_SOURCES})
+    get_filename_component(_source_path "${_source}" PATH)
+    string(REPLACE "/" "\\" _group_path "${_source_path}")
+    source_group("${_group_path}" FILES "${_source}")
+endforeach()
+
 if (SLIC3R_STATIC)
     set(CGAL_Boost_USE_STATIC_LIBS ON CACHE BOOL "" FORCE)
 endif ()
@@ -316,16 +360,19 @@ encoding_check(libslic3r)
 target_compile_definitions(libslic3r PUBLIC -DUSE_TBB -DTBB_USE_CAPTURED_EXCEPTION=0)
 target_include_directories(libslic3r PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(libslic3r PUBLIC ${EXPAT_INCLUDE_DIRS})
+
+find_package(JPEG REQUIRED)
+
 target_link_libraries(libslic3r
     libnest2d
     admesh
-    cereal
+    libcereal
     libigl
     miniz
     boost_libs
     clipper
     nowide
-    ${EXPAT_LIBRARIES}
+    EXPAT::EXPAT
     glu-libtess
     qhull
     semver
@@ -334,6 +381,8 @@ target_link_libraries(libslic3r
     ${CMAKE_DL_LIBS}
     PNG::PNG
     ZLIB::ZLIB
+	JPEG::JPEG
+    qoi
     )
 
 if (TARGET OpenVDB::openvdb)
@@ -347,6 +396,12 @@ endif()
 if(SLIC3R_PROFILE)
     target_link_libraries(libslic3r Shiny)
 endif()
+
+if (APPLE)
+    # This flag prevents the need for minimum SDK version 10.14
+    # currently, PS targets v10.10
+    target_compile_options(libslic3r PUBLIC "-fno-aligned-allocation")
+endif ()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
     add_precompiled_header(libslic3r pchheader.hpp FORCEINCLUDE)

@@ -5,16 +5,23 @@
 #include "GUI_ObjectList.hpp"
 #include "GLCanvas3D.hpp"
 #include "MainFrame.hpp"
+#include "Tab.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Preset.hpp"
+#include "libslic3r/Config.hpp"
+#include "libslic3r/PrintConfig.hpp"
 
+#include <map>
+
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/property_tree/ini_parser.hpp>
-#include <map>
+
 #include <cereal/archives/binary.hpp>
 #include <cereal/types/string.hpp>
 #include <cereal/types/vector.hpp>
@@ -60,7 +67,7 @@ inline void push_style_color(ImGuiCol idx, const ImVec4& col, bool fading_out, f
 
 void write_used_binary(const std::vector<std::string>& ids)
 {
-	boost::filesystem::ofstream file((boost::filesystem::path(data_dir()) / "cache" / "hints.cereal"), std::ios::binary);
+	boost::nowide::ofstream file((boost::filesystem::path(data_dir()) / "cache" / "hints.cereal").string(), std::ios::binary);
 	cereal::BinaryOutputArchive archive(file);
 		HintsCerealData cd { ids };
 	try
@@ -79,7 +86,7 @@ void read_used_binary(std::vector<std::string>& ids)
 		BOOST_LOG_TRIVIAL(warning) << "Failed to load to hints.cereal. File does not exists. " << path.string();
 		return;
 	}
-	boost::filesystem::ifstream file(path);
+	boost::nowide::ifstream file(path.string());
 	cereal::BinaryInputArchive archive(file);
 	HintsCerealData cd;
 	try
@@ -159,6 +166,33 @@ TagCheckResult tag_check_system(const std::string& tag)
 	return TagCheckNotCompatible;
 }
 
+TagCheckResult tag_check_material(const std::string& tag)
+{
+	if (const GUI::Tab* tab = wxGetApp().get_tab(Preset::Type::TYPE_FILAMENT)) {
+		// search PrintConfig filament_type to find if allowed tag
+		if (wxGetApp().app_config->get("filament_type").find(tag)) {
+			const Preset& preset = tab->m_presets->get_edited_preset();
+			const auto* opt = preset.config.opt<ConfigOptionStrings>("filament_type");
+			if (opt->values[0] == tag)
+				return TagCheckAffirmative;
+			return TagCheckNegative;
+		}
+		return TagCheckNotCompatible;
+	}
+	/* TODO: SLA materials
+	else if (const GUI::Tab* tab = wxGetApp().get_tab(Preset::Type::TYPE_SLA_MATERIAL)) {
+		//if (wxGetApp().app_config->get("material_type").find(tag)) {
+			const Preset& preset = tab->m_presets->get_edited_preset();
+			const auto* opt = preset.config.opt<ConfigOptionStrings>("material_type");
+			if (opt->values[0] == tag)
+				return TagCheckAffirmative;
+			return TagCheckNegative;
+		//}
+		return TagCheckNotCompatible;
+	}*/
+	return TagCheckNotCompatible;
+}
+
 // return true if NOT in disabled mode.
 bool tags_check(const std::string& disabled_tags, const std::string& enabled_tags)
 {
@@ -189,6 +223,11 @@ bool tags_check(const std::string& disabled_tags, const std::string& enabled_tag
 					if (result == TagCheckResult::TagCheckAffirmative)
 						continue;
 					result = tag_check_system(tag);
+					if (result == TagCheckResult::TagCheckNegative)
+						return false;
+					if (result == TagCheckResult::TagCheckAffirmative)
+						continue;
+					result = tag_check_material(tag);
 					if (result == TagCheckResult::TagCheckNegative)
 						return false;
 					if (result == TagCheckResult::TagCheckAffirmative)
@@ -229,6 +268,11 @@ bool tags_check(const std::string& disabled_tags, const std::string& enabled_tag
 						return false;
 					if (result == TagCheckResult::TagCheckNegative)
 						continue;
+					result = tag_check_material(tag);
+					if (result == TagCheckResult::TagCheckAffirmative)
+						return false;
+					if (result == TagCheckResult::TagCheckNegative)
+						continue;
 					BOOST_LOG_TRIVIAL(error) << "Hint Notification: Tag " << tag << " in disabled_tags not compatible.";
 				}
 			}
@@ -253,6 +297,10 @@ void HintDatabase::uninit()
 		write_used_binary(m_used_ids);
 	}
 	m_initialized = false;
+	m_loaded_hints.clear();
+	m_sorted_hints = false;
+	m_used_ids.clear();
+	 m_used_ids_loaded = false;
 }
 void HintDatabase::init()
 {
@@ -295,7 +343,11 @@ void HintDatabase::load_hints_from_file(const boost::filesystem::path& path)
 			size_t      weight = 1;
 			bool		was_displayed = is_used(id_string);
 			//unescape text1
-			unescape_string_cstyle(_utf8(dict["text"]), fulltext);
+			unescape_string_cstyle(dict["text"], fulltext);
+			fulltext = _utf8(fulltext);
+#ifdef __APPLE__
+			boost::replace_all(fulltext, "Ctrl+", "⌘");
+#endif //__APPLE__
 			// replace <b> and </b> for imgui markers
 			std::string marker_s(1, ImGui::ColorMarkerStart);
 			std::string marker_e(1, ImGui::ColorMarkerEnd);
@@ -371,10 +423,10 @@ void HintDatabase::load_hints_from_file(const boost::filesystem::path& path)
 					m_loaded_hints.emplace_back(hint_data);
 				// open preferences
 				} else if(dict["hypertext_type"] == "preferences") {
-					int			page = static_cast<Preset::Type>(std::atoi(dict["hypertext_preferences_page"].c_str()));
-					HintData	hint_data{ id_string, text1, weight, was_displayed, hypertext_text, follow_text, disabled_tags, enabled_tags, false, documentation_link, [page]() { wxGetApp().open_preferences(page); } };
+					std::string	page = dict["hypertext_preferences_page"];
+					std::string	item = dict["hypertext_preferences_item"];
+					HintData	hint_data{ id_string, text1, weight, was_displayed, hypertext_text, follow_text, disabled_tags, enabled_tags, false, documentation_link, [page, item]() { wxGetApp().open_preferences(item, page); } };
 					m_loaded_hints.emplace_back(hint_data);
-
 				} else if (dict["hypertext_type"] == "plater") {
 					std::string	item = dict["hypertext_plater_item"];
 					HintData	hint_data{ id_string, text1, weight, was_displayed, hypertext_text, follow_text, disabled_tags, enabled_tags, true, documentation_link, [item]() { wxGetApp().plater()->canvas3D()->highlight_toolbar_item(item); } };
@@ -392,8 +444,8 @@ void HintDatabase::load_hints_from_file(const boost::filesystem::path& path)
 					};
 					m_loaded_hints.emplace_back(hint_data);
 				} else if (dict["hypertext_type"] == "menubar") {
-					wxString menu(_L("&" + dict["hypertext_menubar_menu_name"]));
-					wxString item(_L(dict["hypertext_menubar_item_name"]));
+					wxString menu(_("&" + dict["hypertext_menubar_menu_name"]));
+					wxString item(_(dict["hypertext_menubar_item_name"]));
 					HintData	hint_data{ id_string, text1, weight, was_displayed, hypertext_text, follow_text, disabled_tags, enabled_tags, true, documentation_link, [menu, item]() { wxGetApp().mainframe->open_menubar_item(menu, item); } };
 					m_loaded_hints.emplace_back(hint_data);
 				}
@@ -569,7 +621,7 @@ void NotificationManager::HintNotification::count_lines()
 					float width_of_a = ImGui::CalcTextSize("a").x;
 					int letter_count = (int)((m_window_width - m_window_width_offset) / width_of_a);
 					while (last_end + letter_count < text.size() && ImGui::CalcTextSize(text.substr(last_end, letter_count).c_str()).x < m_window_width - m_window_width_offset) {
-						letter_count++;
+						letter_count += get_utf8_sequence_length(text, last_end + letter_count);
 					}
 					m_endlines.push_back(last_end + letter_count);
 					last_end += letter_count;
@@ -639,7 +691,7 @@ void NotificationManager::HintNotification::count_lines()
 						float width_of_a = ImGui::CalcTextSize("a").x;
 						int letter_count = (int)((m_window_width - m_window_width_offset - size_of_last_line) / width_of_a);
 						while (last_end + letter_count < text.size() && ImGui::CalcTextSize(text.substr(last_end, letter_count).c_str()).x < m_window_width - m_window_width_offset - size_of_last_line) {
-							letter_count++;
+							letter_count += get_utf8_sequence_length(text, last_end + letter_count);
 						}
 						m_endlines2.push_back(last_end + letter_count);
 						last_end += letter_count;
@@ -878,7 +930,7 @@ void NotificationManager::HintNotification::render_preferences_button(ImGuiWrapp
 	}
 	if (imgui.button(button_text.c_str(), button_size.x, button_size.y))
 	{
-		wxGetApp().open_preferences(2);
+		wxGetApp().open_preferences("show_hints", "GUI");
 	}
 
 	ImGui::PopStyleColor(5);
@@ -917,29 +969,14 @@ void NotificationManager::HintNotification::render_right_arrow_button(ImGuiWrapp
 }
 void NotificationManager::HintNotification::render_logo(ImGuiWrapper& imgui, const float win_size_x, const float win_size_y, const float win_pos_x, const float win_pos_y)
 {
-	ImVec2 win_size(win_size_x, win_size_y);
-	ImVec2 win_pos(win_pos_x, win_pos_y);
-	ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(.0f, .0f, .0f, .0f));
-	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(.0f, .0f, .0f, .0f));
-	push_style_color(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f), m_state == EState::FadingOut, m_current_fade_opacity);
-	push_style_color(ImGuiCol_TextSelectedBg, ImVec4(0, .75f, .75f, 1.f), m_state == EState::FadingOut, m_current_fade_opacity);
-	ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(.0f, .0f, .0f, .0f));
-
-	std::wstring button_text;
-	button_text = ImGui::ClippyMarker;//LeftArrowButton;
 	std::string placeholder_text;
 	placeholder_text = ImGui::EjectButton;
-
 	ImVec2 button_pic_size = ImGui::CalcTextSize(placeholder_text.c_str());
-	ImVec2 button_size(button_pic_size.x * 1.25f * 2.f, button_pic_size.y * 1.25f * 2.f);
-	ImGui::SetCursorPosY(win_size.y / 2 - button_size.y * 1.1f);
-	ImGui::SetCursorPosX(0);
-	// shouldnt it render as text?
-	if (imgui.button(button_text.c_str(), button_size.x, button_size.y))
-	{
-	}
-	
-	ImGui::PopStyleColor(5);
+	std::wstring text;
+	text = ImGui::ClippyMarker;
+	ImGui::SetCursorPosX(button_pic_size.x / 3);
+	ImGui::SetCursorPosY(win_size_y / 2 - button_pic_size.y * 2.f);
+	imgui.text(text.c_str());
 }
 void NotificationManager::HintNotification::render_documentation_button(ImGuiWrapper& imgui, const float win_size_x, const float win_size_y, const float win_pos_x, const float win_pos_y)
 {
@@ -1012,7 +1049,7 @@ void NotificationManager::HintNotification::retrieve_data(bool new_hint/* = true
 	if(hint_data != nullptr)
     {
         NotificationData nd { NotificationType::DidYouKnowHint,
-						      NotificationLevel::RegularNotificationLevel,
+						      NotificationLevel::HintNotificationLevel,
 							  0,
 						      hint_data->text,
 							  hint_data->hypertext, nullptr,

@@ -4,6 +4,7 @@
 #include "MeshSplitImpl.hpp"
 #include "ClipperUtils.hpp"
 #include "Geometry.hpp"
+#include "Geometry/ConvexHull.hpp"
 #include "Point.hpp"
 #include "Execution/ExecutionTBB.hpp"
 #include "Execution/ExecutionSeq.hpp"
@@ -66,8 +67,9 @@ TriangleMesh::TriangleMesh(const indexed_triangle_set &its) : its(its)
     fill_initial_stats(this->its, m_stats);
 }
 
-TriangleMesh::TriangleMesh(indexed_triangle_set &&its) : its(std::move(its))
+TriangleMesh::TriangleMesh(indexed_triangle_set &&its, const RepairedMeshErrors& errors/* = RepairedMeshErrors()*/) : its(std::move(its))
 {
+    m_stats.repaired_errors = errors;
     fill_initial_stats(this->its, m_stats);
 }
 
@@ -194,11 +196,12 @@ bool TriangleMesh::ReadSTLFile(const char* input_file, bool repair)
     auto facets_w_3_bad_edge = stl.stats.number_of_facets - stl.stats.connected_facets_1_edge;
     m_stats.open_edges              = stl.stats.backwards_edges + facets_w_1_bad_edge + facets_w_2_bad_edge * 2 + facets_w_3_bad_edge * 3;
 
-    m_stats.edges_fixed             = stl.stats.edges_fixed;
-    m_stats.degenerate_facets       = stl.stats.degenerate_facets;
-    m_stats.facets_removed          = stl.stats.facets_removed;
-    m_stats.facets_reversed         = stl.stats.facets_reversed;
-    m_stats.backwards_edges         = stl.stats.backwards_edges;
+    m_stats.repaired_errors = { stl.stats.edges_fixed,
+                                stl.stats.degenerate_facets,
+                                stl.stats.facets_removed,
+                                stl.stats.facets_reversed,
+                                stl.stats.backwards_edges };
+
     m_stats.number_of_parts         = stl.stats.number_of_parts;
 
     stl_generate_shared_vertices(&stl, this->its);
@@ -325,20 +328,24 @@ void TriangleMesh::mirror(const Axis axis)
 void TriangleMesh::transform(const Transform3d& t, bool fix_left_handed)
 {
     its_transform(its, t);
-    if (fix_left_handed && t.matrix().block(0, 0, 3, 3).determinant() < 0.)
+    double det = t.matrix().block(0, 0, 3, 3).determinant();
+    if (fix_left_handed && det < 0.) {
         its_flip_triangles(its);
-    else
-        m_stats.volume = - m_stats.volume;
+        det = -det;
+    }
+    m_stats.volume *= det;
     update_bounding_box(this->its, this->m_stats);
 }
 
 void TriangleMesh::transform(const Matrix3d& m, bool fix_left_handed)
 {
     its_transform(its, m);
-    if (fix_left_handed && m.determinant() < 0.)
+    double det = m.block(0, 0, 3, 3).determinant();
+    if (fix_left_handed && det < 0.) {
         its_flip_triangles(its);
-    else
-        m_stats.volume = - m_stats.volume;
+        det = -det;
+    }
+    m_stats.volume *= det;
     update_bounding_box(this->its, this->m_stats);
 }
 
@@ -429,87 +436,62 @@ BoundingBoxf3 TriangleMesh::transformed_bounding_box(const Transform3d &trafo) c
     return bbox;
 }
 
+BoundingBoxf3 TriangleMesh::transformed_bounding_box(const Transform3d& trafod, double world_min_z) const
+{
+    // 1) Allocate transformed vertices with their position with respect to print bed surface.
+    std::vector<char>           sides;
+    size_t                      num_above = 0;
+    Eigen::AlignedBox<float, 3> bbox;
+    Transform3f                 trafo = trafod.cast<float>();
+    sides.reserve(its.vertices.size());
+    for (const stl_vertex &v : this->its.vertices) {
+        const stl_vertex pt   = trafo * v;
+        const int        sign = pt.z() > world_min_z ? 1 : pt.z() < world_min_z ? -1 : 0;
+        sides.emplace_back(sign);
+        if (sign >= 0) {
+            // Vertex above or on print bed surface. Test whether it is inside the build volume.
+            ++ num_above;
+            bbox.extend(pt);
+        }
+    }
+
+    // 2) Calculate intersections of triangle edges with the build surface.
+    if (num_above < its.vertices.size()) {
+        // Not completely above the build surface and status may still change by testing edges intersecting the build platform.
+        for (const stl_triangle_vertex_indices &tri : its.indices) {
+            const int s[3] = { sides[tri(0)], sides[tri(1)], sides[tri(2)] };
+            if (std::min(s[0], std::min(s[1], s[2])) < 0 && std::max(s[0], std::max(s[1], s[2])) > 0) {
+                // Some edge of this triangle intersects the build platform. Calculate the intersection.
+                int iprev = 2;
+                for (int iedge = 0; iedge < 3; ++ iedge) {
+                    if (s[iprev] * s[iedge] == -1) {
+                        // edge intersects the build surface. Calculate intersection point.
+                        const stl_vertex p1 = trafo * its.vertices[tri(iprev)];
+                        const stl_vertex p2 = trafo * its.vertices[tri(iedge)];
+                        // Edge crosses the z plane. Calculate intersection point with the plane.
+                        const float t = (world_min_z - p1.z()) / (p2.z() - p1.z());
+                        bbox.extend(Vec3f(p1.x() + (p2.x() - p1.x()) * t, p1.y() + (p2.y() - p1.y()) * t, world_min_z));
+                    }
+                    iprev = iedge;
+                }
+            }
+        }
+    }
+
+    BoundingBoxf3 out;
+    if (! bbox.isEmpty()) {
+        out.min = bbox.min().cast<double>();
+        out.max = bbox.max().cast<double>();
+        out.defined = true;
+    };
+    return out;
+}
+
 TriangleMesh TriangleMesh::convex_hull_3d() const
 {
-    // The qhull call:
-    orgQhull::Qhull qhull;
-    qhull.disableOutputStream(); // we want qhull to be quiet
-    std::vector<realT> src_vertices;
-    try
-    {
-#if REALfloat
-        qhull.runQhull("", 3, (int)this->its.vertices.size(), (const realT*)(this->its.vertices.front().data()), "Qt");
-#else
-        src_vertices.reserve(this->its.vertices.size() * 3);
-        // We will now fill the vector with input points for computation:
-        for (const stl_vertex &v : this->its.vertices)
-            for (int i = 0; i < 3; ++ i)
-                src_vertices.emplace_back(v(i));
-        qhull.runQhull("", 3, (int)src_vertices.size() / 3, src_vertices.data(), "Qt");
-#endif
-    }
-    catch (...)
-    {
-        std::cout << "Unable to create convex hull" << std::endl;
-        return TriangleMesh();
-    }
-
-    // Let's collect results:
-    std::vector<Vec3f>  dst_vertices;
-    std::vector<Vec3i>  dst_facets;
-    // Map of QHull's vertex ID to our own vertex ID (pointing to dst_vertices).
-    std::vector<int>    map_dst_vertices;
-#ifndef NDEBUG
-    Vec3f               centroid = Vec3f::Zero();
-    for (auto pt : this->its.vertices)
-        centroid += pt;
-    centroid /= float(this->its.vertices.size());
-#endif // NDEBUG
-    for (const orgQhull::QhullFacet facet : qhull.facetList()) {
-        // Collect face vertices first, allocate unique vertices in dst_vertices based on QHull's vertex ID.
-        Vec3i  indices;
-        int    cnt = 0;
-        for (const orgQhull::QhullVertex vertex : facet.vertices()) {
-            int id = vertex.id();
-            assert(id >= 0);
-            if (id >= int(map_dst_vertices.size()))
-                map_dst_vertices.resize(next_highest_power_of_2(size_t(id + 1)), -1);
-            if (int i = map_dst_vertices[id]; i == -1) {
-                // Allocate a new vertex.
-                i = int(dst_vertices.size());
-                map_dst_vertices[id] = i;
-                orgQhull::QhullPoint pt(vertex.point());
-                dst_vertices.emplace_back(pt[0], pt[1], pt[2]);
-                indices[cnt] = i;
-            } else {
-                // Reuse existing vertex.
-                indices[cnt] = i;
-            }
-            if (cnt ++ == 3)
-                break;
-        }
-        assert(cnt == 3);
-        if (cnt == 3) {
-            // QHull sorts vertices of a face lexicographically by their IDs, not by face normals.
-            // Calculate face normal based on the order of vertices.
-            Vec3f n  = (dst_vertices[indices(1)] - dst_vertices[indices(0)]).cross(dst_vertices[indices(2)] - dst_vertices[indices(1)]);
-            auto *n2 = facet.getBaseT()->normal;
-            auto  d = n.x() * n2[0] + n.y() * n2[1] + n.z() * n2[2];
-#ifndef NDEBUG
-            Vec3f n3 = (dst_vertices[indices(0)] - centroid);
-            auto  d3 = n.dot(n3);
-            assert((d < 0.f) == (d3 < 0.f));
-#endif // NDEBUG
-            // Get the face normal from QHull.
-            if (d < 0.f)
-                // Fix face orientation.
-                std::swap(indices[1], indices[2]);
-            dst_facets.emplace_back(indices);
-        }
-    }
-
-    TriangleMesh mesh{ std::move(dst_vertices), std::move(dst_facets) };
-    assert(mesh.stats().manifold());
+    TriangleMesh mesh(its_convex_hull(this->its));
+    // Quite often qhull produces non-manifold mesh.
+    // assert(mesh.stats().manifold());
     return mesh;
 }
 
@@ -750,22 +732,16 @@ void its_flip_triangles(indexed_triangle_set &its)
 
 int its_remove_degenerate_faces(indexed_triangle_set &its, bool shrink_to_fit)
 {
-    int last = 0;
-    for (int i = 0; i < int(its.indices.size()); ++ i) {
-        const stl_triangle_vertex_indices &face = its.indices[i];
-        if (face(0) != face(1) && face(0) != face(2) && face(1) != face(2)) {
-            if (last < i)
-                its.indices[last] = its.indices[i];
-            ++ last;
-        }
-    }
-    int removed = int(its.indices.size()) - last;
-    if (removed) {
-        its.indices.erase(its.indices.begin() + last, its.indices.end());
-        // Optionally shrink the vertices.
-        if (shrink_to_fit)
-            its.indices.shrink_to_fit();
-    }
+    auto it = std::remove_if(its.indices.begin(), its.indices.end(), [](auto &face) {
+        return face(0) == face(1) || face(0) == face(2) || face(1) == face(2);
+    });
+
+    int removed = std::distance(it, its.indices.end());
+    its.indices.erase(it, its.indices.end());
+
+    if (removed && shrink_to_fit)
+        its.indices.shrink_to_fit();
+
     return removed;
 }
 
@@ -1077,6 +1053,90 @@ indexed_triangle_set its_make_sphere(double radius, double fa)
     return mesh;
 }
 
+indexed_triangle_set its_convex_hull(const std::vector<Vec3f> &pts)
+{
+    std::vector<Vec3f>  dst_vertices;
+    std::vector<Vec3i>  dst_facets;
+
+    if (! pts.empty()) {
+        // The qhull call:
+        orgQhull::Qhull qhull;
+        qhull.disableOutputStream(); // we want qhull to be quiet
+    #if ! REALfloat
+        std::vector<realT> src_vertices;
+    #endif
+        try {
+    #if REALfloat
+            qhull.runQhull("", 3, (int)pts.size(), (const realT*)(pts.front().data()), "Qt");
+    #else
+            src_vertices.reserve(pts.size() * 3);
+            // We will now fill the vector with input points for computation:
+            for (const stl_vertex &v : pts)
+                for (int i = 0; i < 3; ++ i)
+                    src_vertices.emplace_back(v(i));
+            qhull.runQhull("", 3, (int)src_vertices.size() / 3, src_vertices.data(), "Qt");
+    #endif
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "its_convex_hull: Unable to create convex hull";
+            return {};
+        }
+
+        // Let's collect results:
+        // Map of QHull's vertex ID to our own vertex ID (pointing to dst_vertices).
+        std::vector<int>    map_dst_vertices;
+    #ifndef NDEBUG
+        Vec3f               centroid = Vec3f::Zero();
+        for (const stl_vertex& pt : pts)
+            centroid += pt;
+        centroid /= float(pts.size());
+    #endif // NDEBUG
+        for (const orgQhull::QhullFacet &facet : qhull.facetList()) {
+            // Collect face vertices first, allocate unique vertices in dst_vertices based on QHull's vertex ID.
+            Vec3i  indices;
+            int    cnt = 0;
+            for (const orgQhull::QhullVertex vertex : facet.vertices()) {
+                int id = vertex.id();
+                assert(id >= 0);
+                if (id >= int(map_dst_vertices.size()))
+                    map_dst_vertices.resize(next_highest_power_of_2(size_t(id + 1)), -1);
+                if (int i = map_dst_vertices[id]; i == -1) {
+                    // Allocate a new vertex.
+                    i = int(dst_vertices.size());
+                    map_dst_vertices[id] = i;
+                    orgQhull::QhullPoint pt(vertex.point());
+                    dst_vertices.emplace_back(pt[0], pt[1], pt[2]);
+                    indices[cnt] = i;
+                } else {
+                    // Reuse existing vertex.
+                    indices[cnt] = i;
+                }
+                if (cnt ++ == 3)
+                    break;
+            }
+            assert(cnt == 3);
+            if (cnt == 3) {
+                // QHull sorts vertices of a face lexicographically by their IDs, not by face normals.
+                // Calculate face normal based on the order of vertices.
+                Vec3f n  = (dst_vertices[indices(1)] - dst_vertices[indices(0)]).cross(dst_vertices[indices(2)] - dst_vertices[indices(1)]);
+                auto *n2 = facet.getBaseT()->normal;
+                auto  d = n.x() * n2[0] + n.y() * n2[1] + n.z() * n2[2];
+    #ifndef NDEBUG
+                Vec3f n3 = (dst_vertices[indices(0)] - centroid);
+                auto  d3 = n.dot(n3);
+                assert((d < 0.f) == (d3 < 0.f));
+    #endif // NDEBUG
+                // Get the face normal from QHull.
+                if (d < 0.f)
+                    // Fix face orientation.
+                    std::swap(indices[1], indices[2]);
+                dst_facets.emplace_back(indices);
+            }
+        }
+    }
+
+    return { std::move(dst_facets), std::move(dst_vertices) };
+}
+
 void its_reverse_all_facets(indexed_triangle_set &its)
 {
     for (stl_triangle_vertex_indices &face : its.indices)
@@ -1157,11 +1217,11 @@ std::vector<indexed_triangle_set> its_split(const indexed_triangle_set &its)
 }
 
 // Number of disconnected patches (faces are connected if they share an edge, shared edge defined with 2 shared vertex indices).
-bool its_number_of_patches(const indexed_triangle_set &its)
+size_t its_number_of_patches(const indexed_triangle_set &its)
 {
     return its_number_of_patches<>(its);
 }
-bool its_number_of_patches(const indexed_triangle_set &its, const std::vector<Vec3i> &face_neighbors)
+size_t its_number_of_patches(const indexed_triangle_set &its, const std::vector<Vec3i> &face_neighbors)
 {
     return its_number_of_patches<>(ItsNeighborsWrapper{ its, face_neighbors });
 }
@@ -1179,12 +1239,29 @@ bool its_is_splittable(const indexed_triangle_set &its, const std::vector<Vec3i>
 size_t its_num_open_edges(const std::vector<Vec3i> &face_neighbors)
 {
     size_t num_open_edges = 0;
-    for (Vec3i neighbors : face_neighbors)
+    for (const Vec3i& neighbors : face_neighbors)
         for (int n : neighbors)
             if (n < 0)
                 ++ num_open_edges;
     return num_open_edges;
 }
+
+#if ENABLE_SHOW_NON_MANIFOLD_EDGES
+std::vector<std::pair<int, int>> its_get_open_edges(const indexed_triangle_set& its)
+{
+    std::vector<std::pair<int, int>> ret;
+    std::vector<Vec3i> face_neighbors = its_face_neighbors(its);
+    for (size_t i = 0; i < face_neighbors.size(); ++i) {
+        for (size_t j = 0; j < 3; ++j) {
+            if (face_neighbors[i][j] < 0) {
+                const Vec2i edge_indices = its_triangle_edge(its.indices[i], j);
+                ret.emplace_back(edge_indices[0], edge_indices[1]);
+            }
+        }
+    }
+    return ret;
+}
+#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
 size_t its_num_open_edges(const indexed_triangle_set &its)
 {
@@ -1257,7 +1334,7 @@ bool its_write_stl_ascii(const char *file, const char *label, const std::vector<
 
     fprintf(fp, "solid  %s\n", label);
 
-    for (const stl_triangle_vertex_indices face : indices) {
+    for (const stl_triangle_vertex_indices& face : indices) {
         Vec3f vertex[3] = { vertices[face(0)], vertices[face(1)], vertices[face(2)] };
         Vec3f normal    = (vertex[1] - vertex[0]).cross(vertex[2] - vertex[1]).normalized();
         fprintf(fp, "  facet normal % .8E % .8E % .8E\n", normal(0), normal(1), normal(2));
@@ -1297,7 +1374,7 @@ bool its_write_stl_binary(const char *file, const char *label, const std::vector
     stl_facet f;
     f.extra[0] = 0;
     f.extra[1] = 0;
-    for (const stl_triangle_vertex_indices face : indices) {
+    for (const stl_triangle_vertex_indices& face : indices) {
         f.vertex[0] = vertices[face(0)];
         f.vertex[1] = vertices[face(1)];
         f.vertex[2] = vertices[face(2)];

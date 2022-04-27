@@ -11,6 +11,7 @@
 
 #include "FillBase.hpp"
 #include "FillRectilinear.hpp"
+#include "FillLightning.hpp"
 
 namespace Slic3r {
 
@@ -252,11 +253,11 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
 	        // Corners of infill regions, which would not be filled with an extrusion path with a radius of distance_between_surfaces/2
 	        Polygons collapsed = diff(
 	            surfaces_polygons,
-	            offset2(surfaces_polygons, (float)-distance_between_surfaces/2, (float)+distance_between_surfaces/2 + ClipperSafetyOffset));
+				opening(surfaces_polygons, float(distance_between_surfaces /2), float(distance_between_surfaces / 2 + ClipperSafetyOffset)));
 	        //FIXME why the voids are added to collapsed here? First it is expensive, second the result may lead to some unwanted regions being
 	        // added if two offsetted void regions merge.
 	        // polygons_append(voids, collapsed);
-	        ExPolygons extensions = intersection_ex(offset(collapsed, (float)distance_between_surfaces), voids, ApplySafetyOffset::Yes);
+	        ExPolygons extensions = intersection_ex(expand(collapsed, float(distance_between_surfaces)), voids, ApplySafetyOffset::Yes);
 	        // Now find an internal infill SurfaceFill to add these extrusions to.
 	        SurfaceFill *internal_solid_fill = nullptr;
 			unsigned int region_id = 0;
@@ -318,7 +319,7 @@ void export_group_fills_to_svg(const char *path, const std::vector<SurfaceFill> 
 #endif
 
 // friend to Layer
-void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree)
+void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
 {
 	for (LayerRegion *layerm : m_regions)
 		layerm->fills.clear();
@@ -329,7 +330,8 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
 	std::vector<SurfaceFill>  surface_fills = group_fills(*this);
-	const Slic3r::BoundingBox bbox = this->object()->bounding_box();
+	const Slic3r::BoundingBox bbox 			= this->object()->bounding_box();
+	const auto                resolution 	= this->object()->print()->config().gcode_resolution.value;
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
 	{
@@ -346,6 +348,9 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         f->z 		= this->print_z;
         f->angle 	= surface_fill.params.angle;
         f->adapt_fill_octree = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
+
+        if (surface_fill.params.pattern == ipLightning)
+            dynamic_cast<FillLightning::Filler*>(f.get())->generator = lightning_generator;
 
         // calculate flow spacing for infill pattern generation
         bool using_internal_flow = ! surface_fill.surface.is_solid() && ! surface_fill.params.bridge;
@@ -371,6 +376,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
 		params.dont_adjust		 = false; //  surface_fill.params.dont_adjust;
         params.anchor_length     = surface_fill.params.anchor_length;
 		params.anchor_length_max = surface_fill.params.anchor_length_max;
+		params.resolution        = resolution;
 
         for (ExPolygon &expoly : surface_fill.expolygons) {
 			// Spacing is modified by the filler to indicate adjustments. Reset it for each expolygon.
@@ -537,7 +543,7 @@ void Layer::make_ironing()
     fill_params.density 	 = 1.;
     fill_params.monotonic    = true;
 
-	for (size_t i = 0; i < by_extruder.size(); ++ i) {
+	for (size_t i = 0; i < by_extruder.size();) {
 		// Find span of regions equivalent to the ironing operation.
 		IroningParams &ironing_params = by_extruder[i];
 		size_t j = i;
@@ -587,14 +593,17 @@ void Layer::make_ironing()
 							polygons_append(infills, surface.expolygon);
 				}
 			}
+
+			if (! infills.empty() || j > i + 1) {
+				// Ironing over more than a single region or over solid internal infill.
+				if (! infills.empty())
+					// For IroningType::AllSolid only:
+					// Add solid infill areas for layers, that contain some non-ironable infil (sparse infill, bridge infill).
+					append(polys, std::move(infills));
+				polys = union_safety_offset(polys);
+			}
 			// Trim the top surfaces with half the nozzle diameter.
 			ironing_areas = intersection_ex(polys, offset(this->lslices, - float(scale_(0.5 * nozzle_dmr))));
-			if (! infills.empty()) {
-				// For IroningType::AllSolid only:
-				// Add solid infill areas for layers, that contain some non-ironable infil (sparse infill, bridge infill).
-				append(infills, to_polygons(std::move(ironing_areas)));
-				ironing_areas = union_safety_offset_ex(infills);
-			}
 		}
 
         // Create the filler object.
@@ -624,6 +633,9 @@ void Layer::make_ironing()
 		            flow_mm3_per_mm, extrusion_width, float(extrusion_height));
 		    }
 		}
+
+		// Regions up to j were processed.
+		i = j;
 	}
 }
 

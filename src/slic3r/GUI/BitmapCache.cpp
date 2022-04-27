@@ -6,6 +6,8 @@
 #include "GUI_Utils.hpp"
 
 #include <boost/filesystem.hpp>
+#include <boost/nowide/cstdio.hpp>
+#include <boost/algorithm/string/replace.hpp>
 
 #ifdef __WXGTK2__
     // Broken alpha workaround
@@ -13,7 +15,7 @@
     #include <wx/rawbmp.h>
 #endif /* __WXGTK2__ */
 
-#define NANOSVG_IMPLEMENTATION
+//#define NANOSVG_IMPLEMENTATION
 #include "nanosvg/nanosvg.h"
 #define NANOSVGRAST_IMPLEMENTATION
 #include "nanosvg/nanosvgrast.h"
@@ -260,52 +262,66 @@ wxBitmap* BitmapCache::load_png(const std::string &bitmap_name, unsigned width, 
     return this->insert(bitmap_key, wxImage_to_wxBitmap_with_alpha(std::move(image)));
 }
 
+NSVGimage* BitmapCache::nsvgParseFromFileWithReplace(const char* filename, const char* units, float dpi, const std::map<std::string, std::string>& replaces)
+{
+    std::string str;
+    FILE* fp = NULL;
+    size_t size;
+    char* data = NULL;
+    NSVGimage* image = NULL;
+
+    fp = boost::nowide::fopen(filename, "rb");
+    if (!fp) goto error;
+    fseek(fp, 0, SEEK_END);
+    size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    data = (char*)malloc(size + 1);
+    if (data == NULL) goto error;
+    if (fread(data, 1, size, fp) != size) goto error;
+    data[size] = '\0';	// Must be null terminated.
+    fclose(fp);
+
+    if (replaces.empty())
+        image = nsvgParse(data, units, dpi);
+    else {
+        str.assign(data);
+        for (auto val : replaces)
+            boost::replace_all(str, val.first, val.second);
+        image = nsvgParse(str.data(), units, dpi);
+    }
+    free(data);
+    return image;
+
+error:
+    if (fp) fclose(fp);
+    if (data) free(data);
+    if (image) nsvgDelete(image);
+    return NULL;
+}
+
 wxBitmap* BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_width, unsigned target_height, 
-    const bool grayscale/* = false*/, const bool dark_mode/* = false*/)
+    const bool grayscale/* = false*/, const bool dark_mode/* = false*/, const std::string& new_color /*= ""*/)
 {
     std::string bitmap_key = bitmap_name + ( target_height !=0 ? 
                                            "-h" + std::to_string(target_height) : 
                                            "-w" + std::to_string(target_width))
                                          + (m_scale != 1.0f ? "-s" + float_to_string_decimal_point(m_scale) : "")
-                                         + (grayscale ? "-gs" : "");
+                                         + (dark_mode ? "-dm" : "")
+                                         + (grayscale ? "-gs" : "")
+                                         + new_color;
 
-    /* For the Dark mode of any platform, we should draw icons in respect to OS background
-     * Note: All standard(regular) icons are collected in "icons" folder,
-     *       SVG-icons, which have "Dark mode" variant, are collected in "icons/white" folder
-     */
-    std::string folder;
+    auto it = m_map.find(bitmap_key);
+    if (it != m_map.end())
+        return it->second;
+
+    // map of color replaces
+    std::map<std::string, std::string> replaces;
     if (dark_mode)
-    {
-#ifdef __WXMSW__
-        folder = "white\\";
-#else
-        folder = "white/";
-#endif
-        auto it = m_map.find(folder + bitmap_key);
-        if (it != m_map.end())
-            return it->second;
-        // It's expensive to check if the bitmap exists every time, but otherwise:
-        // For the case, when application was started in Light mode and then switched to the Dark,
-        // we will never get a white bitmaps, if check m_map.find(bitmap_key) 
-        // before boost::filesystem::exists(var(folder + bitmap_name + ".svg"))
-        if (!boost::filesystem::exists(var(folder + bitmap_name + ".svg"))) {
-            folder.clear();
-        
-            it = m_map.find(bitmap_key);
-            if (it != m_map.end())
-                return it->second;
-        }
+        replaces["\"#808080\""] = "\"#FFFFFF\"";
+    if (!new_color.empty())
+        replaces["\"#ED6B21\""] = "\"" + new_color + "\"";
 
-        bitmap_key = folder + bitmap_key;
-    }
-    else 
-    {
-        auto it = m_map.find(bitmap_key);
-        if (it != m_map.end())
-            return it->second;
-    }
-
-    NSVGimage *image = ::nsvgParseFromFile(Slic3r::var(folder + bitmap_name + ".svg").c_str(), "px", 96.0f);
+    NSVGimage *image =  nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
     if (image == nullptr)
         return nullptr;
 
@@ -379,22 +395,6 @@ wxBitmap BitmapCache::mksolid(size_t width, size_t height, unsigned char r, unsi
     }
 
     return wxImage_to_wxBitmap_with_alpha(std::move(image), scale);
-}
-
-bool BitmapCache::parse_color(const std::string& scolor, unsigned char* rgb_out)
-{
-    rgb_out[0] = rgb_out[1] = rgb_out[2] = 0;
-    if (scolor.size() != 7 || scolor.front() != '#')
-        return false;
-    const char* c = scolor.data() + 1;
-    for (size_t i = 0; i < 3; ++i) {
-        int digit1 = hex_digit_to_int(*c++);
-        int digit2 = hex_digit_to_int(*c++);
-        if (digit1 == -1 || digit2 == -1)
-            return false;
-        rgb_out[i] = (unsigned char)(digit1 * 16 + digit2);
-    }
-    return true;
 }
 
 } // namespace GUI

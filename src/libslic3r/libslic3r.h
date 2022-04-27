@@ -23,6 +23,13 @@
 #include <cmath>
 #include <type_traits>
 
+#ifdef _WIN32
+// On MSVC, std::deque degenerates to a list of pointers, which defeats its purpose of reducing allocator load and memory fragmentation.
+// https://github.com/microsoft/STL/issues/147#issuecomment-1090148740
+// Thus it is recommended to use boost::container::deque instead.
+#include <boost/container/deque.hpp>
+#endif // _WIN32
+
 #include "Technologies.hpp"
 #include "Semver.hpp"
 
@@ -47,9 +54,6 @@ static constexpr double EPSILON = 1e-4;
 // int32_t fits an interval of (-2147.48mm, +2147.48mm)
 // with int64_t we don't have to worry anymore about the size of the int.
 static constexpr double SCALING_FACTOR = 0.000001;
-// RESOLUTION, SCALED_RESOLUTION: Used as an error threshold for a Douglas-Peucker polyline simplification algorithm.
-static constexpr double RESOLUTION = 0.0125;
-#define                 SCALED_RESOLUTION (RESOLUTION / SCALING_FACTOR)
 static constexpr double PI = 3.141592653589793238;
 // When extruding a closed loop, the loop is interrupted and shortened a bit to reduce the seam.
 static constexpr double LOOP_CLIPPING_LENGTH_OVER_NOZZLE_DIAMETER = 0.15;
@@ -75,6 +79,16 @@ static constexpr double EXTERNAL_INFILL_MARGIN = 3.;
 namespace Slic3r {
 
 extern Semver SEMVER;
+
+// On MSVC, std::deque degenerates to a list of pointers, which defeats its purpose of reducing allocator load and memory fragmentation.
+template<class T, class Allocator = std::allocator<T>>
+using deque = 
+#ifdef _WIN32
+    // Use boost implementation, which allocates blocks of 512 bytes instead of blocks of 8 bytes.
+    boost::container::deque<T, Allocator>;
+#else // _WIN32
+    std::deque<T, Allocator>;
+#endif // _WIN32
 
 template<typename T, typename Q>
 inline T unscale(Q v) { return T(v) * T(SCALING_FACTOR); }

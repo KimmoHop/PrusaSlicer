@@ -19,7 +19,7 @@ class Polygon : public MultiPoint
 {
 public:
     Polygon() = default;
-    virtual ~Polygon() = default;
+    ~Polygon() override = default;
     explicit Polygon(const Points &points) : MultiPoint(points) {}
 	Polygon(std::initializer_list<Point> points) : MultiPoint(points) {}
     Polygon(const Polygon &other) : MultiPoint(other.points) {}
@@ -65,8 +65,11 @@ public:
     void densify(float min_length, std::vector<float>* lengths = nullptr);
     void triangulate_convex(Polygons* polygons) const;
     Point centroid() const;
-    Points concave_points(double angle = PI) const;
-    Points convex_points(double angle = PI) const;
+    // Considering CCW orientation of this polygon, find all convex resp. concave points
+    // with the angle at the vertex larger than a threshold.
+    // Zero angle_threshold means to accept all convex resp. concave points.
+    Points convex_points(double angle_threshold = 0.) const;
+    Points concave_points(double angle_threshold = 0.) const;
     // Projection of a point onto the polygon.
     Point point_projection(const Point &point) const;
     std::vector<float> parameter_by_length() const;
@@ -83,6 +86,10 @@ BoundingBox get_extents(const Polygons &polygons);
 BoundingBox get_extents_rotated(const Polygon &poly, double angle);
 BoundingBox get_extents_rotated(const Polygons &polygons, double angle);
 std::vector<BoundingBox> get_extents_vector(const Polygons &polygons);
+
+// Polygon must be valid (at least three points), collinear points and duplicate points removed.
+bool        polygon_is_convex(const Points &poly);
+inline bool polygon_is_convex(const Polygon &poly) { return polygon_is_convex(poly.points); }
 
 // Test for duplicate points. The points are copied, sorted and checked for duplicates globally.
 inline bool has_duplicate_points(Polygon &&poly)      { return has_duplicate_points(std::move(poly.points)); }
@@ -216,10 +223,10 @@ inline Polylines to_polylines(Polygons &&polys)
     Polylines polylines;
     polylines.assign(polys.size(), Polyline());
     size_t idx = 0;
-    for (Polygons::const_iterator it = polys.begin(); it != polys.end(); ++ it) {
+    for (auto it = polys.begin(); it != polys.end(); ++ it) {
         Polyline &pl = polylines[idx ++];
         pl.points = std::move(it->points);
-        pl.points.push_back(it->points.front());
+        pl.points.push_back(pl.points.front());
     }
     assert(idx == polylines.size());
     return polylines;
@@ -238,7 +245,7 @@ inline Polygons to_polygons(std::vector<Points> &&paths)
 {
     Polygons out;
     out.reserve(paths.size());
-    for (const Points &path : paths)
+    for (Points &path : paths)
         out.emplace_back(std::move(path));
     return out;
 }

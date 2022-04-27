@@ -379,11 +379,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                         int j = i;
                         bool merged = false;
                         ExPolygons &expolygons = temp_slices[i].expolygons;
-                        for (++ j; 
-                             j < int(temp_slices.size()) && 
-                                temp_slices[i].region_id == temp_slices[j].region_id && 
-                                (clip_multipart_objects || temp_slices[i].volume_id == temp_slices[j].volume_id); 
-                             ++ j)
+                        for (++ j; j < int(temp_slices.size()) && temp_slices[i].region_id == temp_slices[j].region_id; ++ j)
                             if (ExPolygons &expolygons2 = temp_slices[j].expolygons; ! expolygons2.empty()) {
                                 if (expolygons.empty()) {
                                     expolygons = std::move(expolygons2);
@@ -392,8 +388,11 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                     merged = true;
                                 }
                             }
-                        if (merged)
-                            expolygons = offset2_ex(expolygons, float(scale_(EPSILON)), -float(scale_(EPSILON)));
+                        // Don't unite the regions if ! clip_multipart_objects. In that case it is user's responsibility
+                        // to handle region overlaps. Indeed, one may intentionally let the regions overlap to produce crossing perimeters 
+                        // for example.
+                        if (merged && clip_multipart_objects)
+                            expolygons = closing_ex(expolygons, float(scale_(EPSILON)));
                         slices_by_region[temp_slices[i].region_id][z_idx] = std::move(expolygons);
                         i = j;
                     }
@@ -538,7 +537,7 @@ template<typename ThrowOnCancel>
 static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCancel throw_on_cancel)
 {
     // Returns MMU segmentation based on painting in MMU segmentation gizmo
-    std::vector<std::vector<std::pair<ExPolygon, size_t>>> segmentation = multi_material_segmentation_by_painting(print_object, throw_on_cancel);
+    std::vector<std::vector<ExPolygons>> segmentation = multi_material_segmentation_by_painting(print_object, throw_on_cancel);
     assert(segmentation.size() == print_object.layer_count());
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, segmentation.size(), std::max(segmentation.size() / 128, size_t(1))),
@@ -568,9 +567,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                 bool layer_split = false;
                 for (size_t extruder_id = 0; extruder_id < num_extruders; ++ extruder_id) {
                     ByExtruder &region = by_extruder[extruder_id];
-                    for (const std::pair<ExPolygon, size_t> &colored_polygon : segmentation[layer_id])
-                        if (colored_polygon.second == extruder_id)
-                            region.expolygons.emplace_back(std::move(colored_polygon.first));
+                    append(region.expolygons, std::move(segmentation[layer_id][extruder_id]));
                     if (! region.expolygons.empty()) {
                         region.bbox = get_extents(region.expolygons);
                         layer_split = true;
@@ -632,6 +629,13 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                                     if (mine.empty())
                                         break;
                                 }
+                            // Filter out unprintable polygons produced by subtraction multi-material painted regions from layerm.region().
+                            // ExPolygon returned from multi-material segmentation does not precisely match ExPolygons in layerm.region()
+                            // (because of preprocessing of the input regions in multi-material segmentation). Therefore, subtraction from
+                            // layerm.region() could produce a huge number of small unprintable regions for the model's base extruder.
+                            // This could, on some models, produce bulges with the model's base color (#7109).
+                            if (! mine.empty())
+                                mine = opening(union_ex(mine), float(scale_(5 * EPSILON)), float(scale_(5 * EPSILON)));
                             if (! mine.empty()) {
                                 ByRegion &dst = by_region[layerm.region().print_object_region_id()];
                                 if (dst.expolygons.empty()) {
@@ -648,7 +652,7 @@ static inline void apply_mm_segmentation(PrintObject &print_object, ThrowOnCance
                     ByRegion &src = by_region[region_id];
                     if (src.needs_merge)
                         // Multiple regions were merged into one.
-                        src.expolygons = offset2_ex(src.expolygons, float(scale_(10 * EPSILON)), - float(scale_(10 * EPSILON)));
+                        src.expolygons = closing_ex(src.expolygons, float(scale_(10 * EPSILON)));
                     layer->get_region(region_id)->slices.set(std::move(src.expolygons), stInternal);
                 }
             }

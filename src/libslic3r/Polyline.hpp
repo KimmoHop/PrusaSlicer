@@ -16,7 +16,8 @@ typedef std::vector<ThickPolyline> ThickPolylines;
 
 class Polyline : public MultiPoint {
 public:
-    Polyline() {};
+    Polyline() = default;
+    ~Polyline() override = default;
     Polyline(const Polyline &other) : MultiPoint(other.points) {}
     Polyline(Polyline &&other) : MultiPoint(std::move(other.points)) {}
     Polyline(std::initializer_list<Point> list) : MultiPoint(list) {}
@@ -138,7 +139,7 @@ inline Polylines to_polylines(std::vector<Points> &&paths)
 {
     Polylines out;
     out.reserve(paths.size());
-    for (const Points &path : paths)
+    for (Points &path : paths)
         out.emplace_back(std::move(path));
     return out;
 }

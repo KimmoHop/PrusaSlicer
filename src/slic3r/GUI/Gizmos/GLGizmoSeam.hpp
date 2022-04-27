@@ -11,7 +11,7 @@ public:
     GLGizmoSeam(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
         : GLGizmoPainterBase(parent, icon_filename, sprite_id) {}
 
-    void render_painter_gizmo() const override;
+    void render_painter_gizmo() override;
 
 protected:
     void on_render_input_window(float x, float y, float bottom_limit) override;
@@ -22,6 +22,7 @@ protected:
 
     std::string get_gizmo_entering_text() const override { return _u8L("Entering Seam painting"); }
     std::string get_gizmo_leaving_text() const override { return _u8L("Leaving Seam painting"); }
+    std::string get_action_snapshot_name() override { return _u8L("Paint-on seam editing"); }
 
 private:
     bool on_init() override;

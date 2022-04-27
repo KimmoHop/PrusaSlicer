@@ -33,6 +33,7 @@ namespace cereal {
 namespace Slic3r {
 enum class ConversionType;
 
+class BuildVolume;
 class Model;
 class ModelInstance;
 class ModelMaterial;
@@ -366,9 +367,6 @@ public:
     double get_instance_min_z(size_t instance_idx) const;
     double get_instance_max_z(size_t instance_idx) const;
 
-    // Called by Print::validate() from the UI thread.
-    unsigned int check_instances_print_volume_state(const BoundingBoxf3& print_volume);
-
     // Print object statistics to console.
     void print_info() const;
 
@@ -377,7 +375,7 @@ public:
     // Get full stl statistics for all object's meshes
     TriangleMeshStats get_object_stl_stats() const;
     // Get count of errors in the mesh( or all object's meshes, if volume index isn't defined)
-    int         get_mesh_errors_count(const int vol_idx = -1) const;
+    int         get_repaired_errors_count(const int vol_idx = -1) const;
 
 private:
     friend class Model;
@@ -501,6 +499,9 @@ private:
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation,
             m_bounding_box, m_bounding_box_valid, m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid);
 	}
+
+    // Called by Print::validate() from the UI thread.
+    unsigned int update_instances_print_volume_state(const BuildVolume &build_volume);
 };
 
 enum class EnforcerBlockerType : int8_t {
@@ -680,9 +681,9 @@ public:
 
     void                calculate_convex_hull();
     const TriangleMesh& get_convex_hull() const;
-    std::shared_ptr<const TriangleMesh> get_convex_hull_shared_ptr() const { return m_convex_hull; }
+    const std::shared_ptr<const TriangleMesh>& get_convex_hull_shared_ptr() const { return m_convex_hull; }
     // Get count of errors in the mesh
-    int                 get_mesh_errors_count() const;
+    int                 get_repaired_errors_count() const;
 
     // Helpers for loading / storing into AMF / 3MF files.
     static ModelVolumeType type_from_string(const std::string &s);
@@ -816,8 +817,8 @@ private:
         this->set_material_id(other.material_id());
     }
     // Providing a new mesh, therefore this volume will get a new unique ID assigned.
-    ModelVolume(ModelObject *object, const ModelVolume &other, const TriangleMesh &&mesh) :
-        name(other.name), source(other.source), m_mesh(new TriangleMesh(std::move(mesh))), config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation)
+    ModelVolume(ModelObject *object, const ModelVolume &other, TriangleMesh &&mesh) :
+        name(other.name), source(other.source), config(other.config), object(object), m_mesh(new TriangleMesh(std::move(mesh))), m_type(other.m_type), m_transformation(other.m_transformation)
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
@@ -832,7 +833,7 @@ private:
         assert(this->config.id() == other.config.id());
         this->set_material_id(other.material_id());
         this->config.set_new_unique_id();
-        if (mesh.facets_count() > 1)
+        if (m_mesh->facets_count() > 1)
             calculate_convex_hull();
 		assert(this->config.id().valid()); 
         assert(this->config.id() != other.config.id()); 
@@ -903,7 +904,6 @@ enum ModelInstanceEPrintVolumeState : unsigned char
     ModelInstancePVS_Fully_Outside,
     ModelInstanceNum_BedStates
 };
-
 
 // A single instance of a ModelObject.
 // Knows the affine transformation of an object.
@@ -1109,8 +1109,8 @@ public:
     BoundingBoxf3 bounding_box() const;
     // Set the print_volume_state of PrintObject::instances, 
     // return total number of printable objects.
-    unsigned int  update_print_volume_state(const BoundingBoxf3 &print_volume);
-	// Returns true if any ModelObject was modified.
+    unsigned int  update_print_volume_state(const BuildVolume &build_volume);
+    // Returns true if any ModelObject was modified.
     bool 		  center_instances_around_point(const Vec2d &point);
     void 		  translate(coordf_t x, coordf_t y, coordf_t z) { for (ModelObject *o : this->objects) o->translate(x, y, z); }
     TriangleMesh  mesh() const;
@@ -1124,6 +1124,7 @@ public:
     void          convert_from_imperial_units(bool only_small_volumes);
     bool          looks_like_saved_in_meters() const;
     void          convert_from_meters(bool only_small_volumes);
+    int           removed_objects_with_zero_volume();
 
     // Ensures that the min z of the model is not negative
     void 		  adjust_min_z();

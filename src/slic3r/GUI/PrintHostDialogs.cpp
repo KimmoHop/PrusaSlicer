@@ -23,7 +23,6 @@
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
 #include "I18N.hpp"
-#include "../Utils/PrintHost.hpp"
 #include "MainFrame.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "NotificationManager.hpp"
@@ -35,14 +34,14 @@ namespace Slic3r {
 namespace GUI {
 
 static const char *CONFIG_KEY_PATH  = "printhost_path";
-static const char *CONFIG_KEY_PRINT = "printhost_print";
 static const char *CONFIG_KEY_GROUP = "printhost_group";
 
-PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, bool can_start_print, const wxArrayString &groups)
-    : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-Code to printer host"), _L("Upload to Printer Host with the following filename:"), wxID_NONE)
+PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUploadActions post_actions, const wxArrayString &groups)
+    : MsgDialog(static_cast<wxWindow*>(wxGetApp().mainframe), _L("Send G-Code to printer host"), _L("Upload to Printer Host with the following filename:"), 0) // Set style = 0 to avoid default creation of the "OK" button. 
+                                                                                                                                                               // All buttons will be added later in this constructor 
     , txt_filename(new wxTextCtrl(this, wxID_ANY))
-    , box_print(can_start_print ? new wxCheckBox(this, wxID_ANY, _L("Start printing after upload")) : nullptr)
     , combo_groups(!groups.IsEmpty() ? new wxComboBox(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, groups, wxCB_READONLY) : nullptr)
+    , post_upload_action(PrintHostPostUploadAction::None)
 {
 #ifdef __APPLE__
     txt_filename->OSXDisableAllSmartSubstitutions();
@@ -55,10 +54,6 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, bool can_start_pr
     content_sizer->Add(txt_filename, 0, wxEXPAND);
     content_sizer->Add(label_dir_hint);
     content_sizer->AddSpacer(VERT_SPACING);
-    if (box_print != nullptr) {
-        content_sizer->Add(box_print, 0, wxBOTTOM, 2*VERT_SPACING);
-        box_print->SetValue(app_config->get("recent", CONFIG_KEY_PRINT) == "1");
-    }
     
     if (combo_groups != nullptr) {
         // Repetier specific: Show a selection of file groups.
@@ -70,10 +65,6 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, bool can_start_pr
             combo_groups->SetValue(recent_group);
     }
 
-    auto* szr = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
-    auto* btn_ok = szr->GetAffirmativeButton();
-    btn_sizer->Add(szr);
-    
     wxString recent_path = from_u8(app_config->get("recent", CONFIG_KEY_PATH));
     if (recent_path.Length() > 0 && recent_path[recent_path.Length() - 1] != '/') {
         recent_path += '/';
@@ -84,25 +75,51 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, bool can_start_pr
     const auto stem_len = stem.Length();
 
     txt_filename->SetValue(recent_path);
+
+    if (size_t extension_start = recent_path.find_last_of('.'); extension_start != std::string::npos)
+        m_valid_suffix = recent_path.substr(extension_start);
+    // .gcode suffix control
+    auto validate_path = [this](const wxString &path) -> bool {
+        if (! path.Lower().EndsWith(m_valid_suffix.Lower())) {
+            MessageDialog msg_wingow(this, wxString::Format(_L("Upload filename doesn't end with \"%s\". Do you wish to continue?"), m_valid_suffix), wxString(SLIC3R_APP_NAME), wxYES | wxNO);
+            if (msg_wingow.ShowModal() == wxID_NO)
+                return false;
+        }
+        return true;
+    };
+
+    auto* btn_ok = add_button(wxID_OK, true, _L("Upload"));
+    btn_ok->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
+        if (validate_path(txt_filename->GetValue())) {
+            post_upload_action = PrintHostPostUploadAction::None;
+            EndDialog(wxID_OK);
+        }
+    });
     txt_filename->SetFocus();
     
-    wxString suffix = recent_path.substr(recent_path.find_last_of('.'));
-
-    btn_ok->Bind(wxEVT_BUTTON, [this, suffix](wxCommandEvent&) {
-        wxString path = txt_filename->GetValue();
-        // .gcode suffix control
-        if (!path.Lower().EndsWith(suffix.Lower()))
-        {
-            //wxMessageDialog msg_wingow(this, wxString::Format(_L("Upload filename doesn't end with \"%s\". Do you wish to continue?"), suffix), wxString(SLIC3R_APP_NAME), wxYES | wxNO);
-            MessageDialog msg_wingow(this, wxString::Format(_L("Upload filename doesn't end with \"%s\". Do you wish to continue?"), suffix), wxString(SLIC3R_APP_NAME), wxYES | wxNO);
-            if (msg_wingow.ShowModal() == wxID_NO)
-                return;
-        }
-        EndDialog(wxID_OK);
+    if (post_actions.has(PrintHostPostUploadAction::StartPrint)) {
+        auto* btn_print = add_button(wxID_YES, false, _L("Upload and Print"));
+        btn_print->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
+            if (validate_path(txt_filename->GetValue())) {
+                post_upload_action = PrintHostPostUploadAction::StartPrint;
+                EndDialog(wxID_OK);
+            }
         });
+    }
 
-    Fit();
-    CenterOnParent();
+    if (post_actions.has(PrintHostPostUploadAction::StartSimulation)) {
+        // Using wxID_MORE as a button identifier to be different from the other buttons, wxID_MORE has no other meaning here.
+        auto* btn_simulate = add_button(wxID_MORE, false, _L("Upload and Simulate"));
+        btn_simulate->Bind(wxEVT_BUTTON, [this, validate_path](wxCommandEvent&) {
+            if (validate_path(txt_filename->GetValue())) {
+                post_upload_action = PrintHostPostUploadAction::StartSimulation;
+                EndDialog(wxID_OK);
+            }        
+        });
+    }
+
+    add_button(wxID_CANCEL);
+    finalize();
 
 #ifdef __linux__
     // On Linux with GTK2 when text control lose the focus then selection (colored background) disappears but text color stay white
@@ -119,6 +136,7 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, bool can_start_pr
         // Another similar case where the function only works with EVT_SHOW + CallAfter,
         // this time on Mac.
         CallAfter([=]() {
+            txt_filename->SetInsertionPoint(0);
             txt_filename->SetSelection(recent_path_len, recent_path_len + stem_len);
         });
     });
@@ -129,9 +147,9 @@ fs::path PrintHostSendDialog::filename() const
     return into_path(txt_filename->GetValue());
 }
 
-bool PrintHostSendDialog::start_print() const
+PrintHostPostUploadAction PrintHostSendDialog::post_action() const
 {
-    return box_print != nullptr ? box_print->GetValue() : false;
+    return post_upload_action;
 }
 
 std::string PrintHostSendDialog::group() const
@@ -157,8 +175,7 @@ void PrintHostSendDialog::EndModal(int ret)
                 
 		AppConfig *app_config = wxGetApp().app_config;
 		app_config->set("recent", CONFIG_KEY_PATH, into_u8(path));
-        app_config->set("recent", CONFIG_KEY_PRINT, start_print() ? "1" : "0");
-        
+
         if (combo_groups != nullptr) {
             wxString group = combo_groups->GetValue();
             app_config->set("recent", CONFIG_KEY_GROUP, into_u8(group));
@@ -231,7 +248,7 @@ PrintHostQueueDialog::PrintHostQueueDialog(wxWindow *parent)
     job_list->AppendProgressColumn(_L("Progress"),      wxDATAVIEW_CELL_INERT, widths[1], wxALIGN_LEFT, wxDATAVIEW_COL_RESIZABLE | wxDATAVIEW_COL_SORTABLE);
     append_text_column(_L("Status"),widths[2]);
     append_text_column(_L("Host"),  widths[3]);
-    append_text_column(_CTX_utf8(L_CONTEXT("Size", "OfFile"), "OfFile"), widths[4]);
+    append_text_column(_CTX(L_CONTEXT("Size", "OfFile"), "OfFile"), widths[4]);
     append_text_column(_L("Filename"),      widths[5]);
     append_text_column(_L("Error Message"), -1, wxALIGN_CENTER, wxDATAVIEW_COL_HIDDEN);
  
@@ -308,7 +325,7 @@ void PrintHostQueueDialog::append_job(const PrintHostJob &job)
     } else 
         stream << std::fixed << std::setprecision(2) << ((float)size_i / 1024 / 1024) << "MB";
     fields.push_back(wxVariant(stream.str()));
-    fields.push_back(wxVariant(job.upload_data.upload_path.string()));
+    fields.push_back(wxVariant(from_path(job.upload_data.upload_path)));
     fields.push_back(wxVariant(""));
     job_list->AppendItem(fields, static_cast<wxUIntPtr>(ST_NEW));
     // Both strings are UTF-8 encoded.
@@ -329,6 +346,14 @@ void PrintHostQueueDialog::on_dpi_changed(const wxRect &suggested_rect)
     Refresh();
 
     save_user_data(UDT_SIZE | UDT_POSITION | UDT_COLS);
+}
+
+void PrintHostQueueDialog::on_sys_color_changed()
+{
+#ifdef _WIN32
+    wxGetApp().UpdateDlgDarkUI(this);
+    wxGetApp().UpdateDVCDarkUI(job_list);
+#endif
 }
 
 PrintHostQueueDialog::JobState PrintHostQueueDialog::get_state(int idx)

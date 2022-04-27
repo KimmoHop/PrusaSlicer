@@ -48,15 +48,15 @@ struct Option {
 using t_option = std::unique_ptr<Option>;	//!
 
 /// Represents option lines
-class Line {
+class Line : public UndoValueUIManager
+{
+	bool		m_is_separator{ false };
 public:
     wxString	label;
     wxString	label_tooltip;
-	wxString	label_path;
+	std::string	label_path;
 
     size_t		full_width {0}; 
-	wxColour*	full_Label_color {nullptr};
-	bool		blink	{false};
     widget_t	widget {nullptr};
     std::function<wxWindow*(wxWindow*)>	near_label_widget{ nullptr };
 	wxWindow*	near_label_widget_win {nullptr};
@@ -71,10 +71,19 @@ public:
     }
 	Line(wxString label, wxString tooltip) :
 		label(_(label)), label_tooltip(_(tooltip)) {}
+	Line() : m_is_separator(true) {}
+
+	Line(const std::string& opt_key, const wxString& label, const wxString& tooltip) :
+		label(_(label)), label_tooltip(_(tooltip))
+	{
+		m_options.push_back(Option({ opt_key, coNone }, opt_key));
+	}
+
+	bool is_separator() const { return m_is_separator; }
+	bool has_only_option(const std::string& opt_key) const { return m_options.size() == 1 && m_options[0].opt_id == opt_key; }
 
     const std::vector<widget_t>&	get_extra_widgets() const {return m_extra_widgets;}
     const std::vector<Option>&		get_options() const { return m_options; }
-	bool*							get_blink_ptr() { return &blink; }
 
 private:
 	std::vector<Option>		m_options;//! {std::vector<Option>()};
@@ -95,6 +104,7 @@ public:
     size_t			label_width = 20 ;// {200};
     wxSizer*		sizer {nullptr};
 	OG_CustomCtrl*  custom_ctrl{ nullptr };
+	int				ctrl_horiz_alignment{ wxALIGN_LEFT};
     column_t		extra_column {nullptr};
     t_change		m_on_change { nullptr };
 	// To be called when the field loses focus, to assign a new initial value to the field.
@@ -124,18 +134,27 @@ public:
 	void		activate_line(Line& line);
 
 	// create all controls for the option group from the m_lines
-	bool		activate(std::function<void()> throw_if_canceled = [](){});
+	bool		activate(std::function<void()> throw_if_canceled = [](){}, int horiz_alignment = wxALIGN_LEFT);
 	// delete all controls from the option group
 	void		clear(bool destroy_custom_ctrl = false);
 
-    Line		create_single_option_line(const Option& option, const wxString& path = wxEmptyString) const;
-    void		append_single_option_line(const Option& option, const wxString& path = wxEmptyString) { append_line(create_single_option_line(option, path)); }
+    Line		create_single_option_line(const Option& option, const std::string& path = std::string()) const;
+    void		append_single_option_line(const Option& option, const std::string& path = std::string()) { append_line(create_single_option_line(option, path)); }
+	void		append_separator();
 
     // return a non-owning pointer reference 
     inline Field*	get_field(const t_config_option_key& id) const{
 							if (m_fields.find(id) == m_fields.end()) return nullptr;
 							return m_fields.at(id).get();
     }
+
+    inline Line*	get_line(const t_config_option_key& id) {
+		for (Line& line : m_lines)
+			if (line.has_only_option(id))
+				return &line;
+		return nullptr;
+    }
+
 	bool			set_value(const t_config_option_key& id, const boost::any& value, bool change_event = false) {
 							if (m_fields.find(id) == m_fields.end()) return false;
 							m_fields.at(id)->set_value(value, change_event);
@@ -166,11 +185,18 @@ public:
 
 	OptionsGroup(	wxWindow* _parent, const wxString& title, bool is_tab_opt = false, 
                     column_t extra_clmn = nullptr);
-	~OptionsGroup() { clear(true); }
+	virtual ~OptionsGroup() { clear(true); }
 
     wxGridSizer*        get_grid_sizer() { return m_grid_sizer; }
 	const std::vector<Line>& get_lines() { return m_lines; }
 	bool				is_legend_line();
+	// if we have to set the same control alignment for different option groups, 
+    // we have to set same max contrtol width to all of them
+	void				set_max_win_width(int max_win_width);
+	void				set_use_custom_ctrl(bool use_custom_ctrl) { m_use_custom_ctrl = use_custom_ctrl; }
+	const std::map<t_config_option_key, Option>& get_optioms_map() { return m_options; }
+
+	bool				is_activated() { return sizer != nullptr; }
 
 protected:
 	std::map<t_config_option_key, Option>	m_options;
@@ -210,6 +236,11 @@ protected:
 	virtual void		on_change_OG(const t_config_option_key& opt_id, const boost::any& value);
 	virtual void		back_to_initial_value(const std::string& opt_key) {}
 	virtual void		back_to_sys_value(const std::string& opt_key) {}
+
+public:
+	static wxString		get_url(const std::string& path_end);
+	static bool			launch_browser(const std::string& path_end);
+	static bool			is_option_without_field(const std::string& opt_key);
 };
 
 class ConfigOptionsGroup: public OptionsGroup {
@@ -222,6 +253,7 @@ public:
 		OptionsGroup(parent, title, is_tab_opt, extra_clmn), m_config(&config->get()), m_modelconfig(config) {}
 	ConfigOptionsGroup(	wxWindow* parent) :
 		OptionsGroup(parent, wxEmptyString, true, nullptr) {}
+    ~ConfigOptionsGroup() override = default;
 
 	const wxString& config_category() const throw() { return m_config_category; }
 	int config_type() const throw() { return m_config_type; }
@@ -230,17 +262,17 @@ public:
 	void 		set_config_category_and_type(const wxString &category, int type) { m_config_category = category; m_config_type = type; }
     void        set_config(DynamicPrintConfig* config) { m_config = config; m_modelconfig = nullptr; }
 	Option		get_option(const std::string& opt_key, int opt_index = -1);
-	Line		create_single_option_line(const std::string& title, const wxString& path = wxEmptyString, int idx = -1) /*const*/{
+	Line		create_single_option_line(const std::string& title, const std::string& path = std::string(), int idx = -1) /*const*/{
 		Option option = get_option(title, idx);
 		return OptionsGroup::create_single_option_line(option, path);
 	}
-	Line		create_single_option_line(const Option& option, const wxString& path = wxEmptyString) const {
+	Line		create_single_option_line(const Option& option, const std::string& path = std::string()) const {
 		return OptionsGroup::create_single_option_line(option, path);
 	}
-	void		append_single_option_line(const Option& option, const wxString& path = wxEmptyString)	{
+	void		append_single_option_line(const Option& option, const std::string& path = std::string())	{
 		OptionsGroup::append_single_option_line(option, path);
 	}
-	void		append_single_option_line(const std::string title, const wxString& path = wxEmptyString, int idx = -1)
+	void		append_single_option_line(const std::string title, const std::string& path = std::string(), int idx = -1)
 	{
 		Option option = get_option(title, idx);
 		append_single_option_line(option, path);
@@ -289,6 +321,9 @@ public:
 	~ogStaticText() {}
 
 	void		SetText(const wxString& value, bool wrap = true);
+	// Set special path end. It will be used to generation of the hyperlink on info page
+	void		SetPathEnd(const std::string& link);
+	void		FocusText(bool focus);
 };
 
 }}

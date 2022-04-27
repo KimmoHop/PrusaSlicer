@@ -139,21 +139,36 @@ namespace ImGui
     const wchar_t EjectHoverButton         = 0x13;
     const wchar_t CancelButton             = 0x14;
     const wchar_t CancelHoverButton        = 0x15;
-    const wchar_t VarLayerHeightMarker     = 0x16;
+//    const wchar_t VarLayerHeightMarker     = 0x16;
 
     const wchar_t RightArrowButton         = 0x18;
     const wchar_t RightArrowHoverButton    = 0x19;
     const wchar_t PreferencesButton        = 0x1A;
     const wchar_t PreferencesHoverButton   = 0x1B;
-    const wchar_t SinkingObjectMarker      = 0x1C;
-    const wchar_t CustomSupportsMarker     = 0x1D;
-    const wchar_t CustomSeamMarker         = 0x1E;
-    const wchar_t MmuSegmentationMarker    = 0x1F;
+//    const wchar_t SinkingObjectMarker      = 0x1C;
+//    const wchar_t CustomSupportsMarker     = 0x1D;
+//    const wchar_t CustomSeamMarker         = 0x1E;
+//    const wchar_t MmuSegmentationMarker    = 0x1F;
+    // Do not forget use following letters only in wstring
     const wchar_t DocumentationButton      = 0x2600;
     const wchar_t DocumentationHoverButton = 0x2601;
     const wchar_t ClippyMarker             = 0x2602;
-    
-        
+    const wchar_t InfoMarker               = 0x2603;
+    const wchar_t SliderFloatEditBtnIcon   = 0x2604;
+    const wchar_t SliderFloatEditBtnPressedIcon = 0x2605;
+    const wchar_t LegendTravel             = 0x2606;
+    const wchar_t LegendWipe               = 0x2607;
+    const wchar_t LegendRetract            = 0x2608;
+    const wchar_t LegendDeretract          = 0x2609;
+    const wchar_t LegendSeams              = 0x2610;
+    const wchar_t LegendToolChanges        = 0x2611;
+    const wchar_t LegendColorChanges       = 0x2612;
+    const wchar_t LegendPausePrints        = 0x2613;
+    const wchar_t LegendCustomGCodes       = 0x2614;
+    const wchar_t LegendCOG                = 0x2615;
+    const wchar_t LegendShells             = 0x2616;
+    const wchar_t LegendToolMarker         = 0x2617;
+
 //    void MyFunction(const char* name, const MyMatrix44& v);
 }
 

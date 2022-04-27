@@ -44,7 +44,7 @@ enum class MachineLimitsUsage {
 };
 
 enum PrintHostType {
-    htPrusaLink, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier
+    htPrusaLink, htOctoPrint, htDuet, htFlashAir, htAstroBox, htRepetier, htMKS
 };
 
 enum AuthorizationType {
@@ -59,7 +59,9 @@ enum class FuzzySkinType {
 
 enum InfillPattern : int {
     ipRectilinear, ipMonotonic, ipAlignedRectilinear, ipGrid, ipTriangles, ipStars, ipCubic, ipLine, ipConcentric, ipHoneycomb, ip3DHoneycomb,
-    ipGyroid, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral, ipAdaptiveCubic, ipSupportCubic, ipSupportBase, ipCount,
+    ipGyroid, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral, ipAdaptiveCubic, ipSupportCubic, ipSupportBase,
+    ipLightning,
+ipCount,
 };
 
 enum class IroningType {
@@ -125,6 +127,10 @@ enum DraftShield {
     dsDisabled, dsLimited, dsEnabled
 };
 
+enum class GCodeThumbnailsFormat {
+    PNG, JPG, QOI
+};
+
 #define CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NAME) \
     template<> const t_config_enum_names& ConfigOptionEnum<NAME>::get_enum_names(); \
     template<> const t_config_enum_values& ConfigOptionEnum<NAME>::get_enum_values();
@@ -146,6 +152,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DraftShield)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 
 #undef CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS
@@ -223,6 +230,8 @@ public:
     void                handle_legacy(t_config_option_key &opt_key, std::string &value) const override
         { PrintConfigDef::handle_legacy(opt_key, value); }
 };
+
+void handle_legacy_sla(DynamicPrintConfig &config);
 
 class StaticPrintConfig : public StaticConfig
 {
@@ -633,6 +642,12 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                gcode_comments))
     ((ConfigOptionEnum<GCodeFlavor>,   gcode_flavor))
     ((ConfigOptionBool,                gcode_label_objects))
+    // Triples of strings: "search pattern", "replace with pattern", "attribs"
+    // where "attribs" are one of:
+    //      r - regular expression
+    //      i - case insensitive
+    //      w - whole word
+    ((ConfigOptionStrings,             gcode_substitutions))
     ((ConfigOptionString,              layer_gcode))
     ((ConfigOptionFloat,               max_print_speed))
     ((ConfigOptionFloat,               max_volumetric_speed))
@@ -732,6 +747,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionString,             printer_model))
     ((ConfigOptionString,             printer_notes))
     ((ConfigOptionFloat,              resolution))
+    ((ConfigOptionFloat,              gcode_resolution))
     ((ConfigOptionFloats,             retract_before_travel))
     ((ConfigOptionBools,              retract_layer_change))
     ((ConfigOptionFloat,              skirt_distance))
@@ -742,6 +758,8 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInt,                standby_temperature_delta))
     ((ConfigOptionInts,               temperature))
     ((ConfigOptionInt,                threads))
+    ((ConfigOptionPoints,             thumbnails))
+    ((ConfigOptionEnum<GCodeThumbnailsFormat>,  thumbnails_format))
     ((ConfigOptionBools,              wipe))
     ((ConfigOptionBool,               wipe_tower))
     ((ConfigOptionFloat,              wipe_tower_x))
@@ -913,6 +931,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat, hollowing_closing_distance))
 )
 
+enum SLAMaterialSpeed { slamsSlow, slamsFast };
+
 PRINT_CONFIG_CLASS_DEFINE(
     SLAMaterialConfig,
 
@@ -924,6 +944,10 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                       exposure_time))
     ((ConfigOptionFloat,                       initial_exposure_time))
     ((ConfigOptionFloats,                      material_correction))
+    ((ConfigOptionFloat,                       material_correction_x))
+    ((ConfigOptionFloat,                       material_correction_y))
+    ((ConfigOptionFloat,                       material_correction_z))
+    ((ConfigOptionEnum<SLAMaterialSpeed>,      material_print_speed))
 )
 
 PRINT_CONFIG_CLASS_DEFINE(
@@ -940,6 +964,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                       display_mirror_x))
     ((ConfigOptionBool,                       display_mirror_y))
     ((ConfigOptionFloats,                     relative_correction))
+    ((ConfigOptionFloat,                      relative_correction_x))
+    ((ConfigOptionFloat,                      relative_correction_y))
+    ((ConfigOptionFloat,                      relative_correction_z))
     ((ConfigOptionFloat,                      absolute_correction))
     ((ConfigOptionFloat,                      elefant_foot_compensation))
     ((ConfigOptionFloat,                      elefant_foot_min_width))
@@ -951,6 +978,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                      max_exposure_time))
     ((ConfigOptionFloat,                      min_initial_exposure_time))
     ((ConfigOptionFloat,                      max_initial_exposure_time))
+    ((ConfigOptionString,                     sla_archive_format))
+    ((ConfigOptionFloat,                      sla_output_precision))
 )
 
 PRINT_CONFIG_CLASS_DERIVED_DEFINE0(

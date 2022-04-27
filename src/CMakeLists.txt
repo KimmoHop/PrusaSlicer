@@ -9,14 +9,24 @@ add_subdirectory(boost)
 add_subdirectory(clipper)
 add_subdirectory(miniz)
 add_subdirectory(glu-libtess)
-add_subdirectory(qhull)
 add_subdirectory(Shiny)
 add_subdirectory(semver)
 add_subdirectory(libigl)
 add_subdirectory(hints)
+add_subdirectory(qoi)
 
 # Adding libnest2d project for bin packing...
 add_subdirectory(libnest2d)
+
+find_package(Qhull 7.2 REQUIRED)
+add_library(qhull INTERFACE)
+if(SLIC3R_STATIC)
+    slic3r_remap_configs("Qhull::qhullcpp;Qhull::qhullstatic_r" RelWithDebInfo Release)
+    target_link_libraries(qhull INTERFACE Qhull::qhullcpp Qhull::qhullstatic_r)
+else()
+    slic3r_remap_configs("Qhull::qhullcpp;Qhull::qhull_r" RelWithDebInfo Release)
+    target_link_libraries(qhull INTERFACE Qhull::qhullcpp Qhull::qhull_r)
+endif()
 
 add_subdirectory(libslic3r)
 
@@ -82,7 +92,7 @@ if (SLIC3R_GUI)
     string(REGEX MATCH "wxexpat" WX_EXPAT_BUILTIN ${wxWidgets_LIBRARIES})
     if (EXPAT_FOUND AND NOT WX_EXPAT_BUILTIN)
         list(FILTER wxWidgets_LIBRARIES EXCLUDE REGEX expat)
-        list(APPEND wxWidgets_LIBRARIES ${EXPAT_LIBRARIES})
+        list(APPEND wxWidgets_LIBRARIES EXPAT::EXPAT)
     endif ()
     
     # This is an issue in the new wxWidgets cmake build, doesn't deal with librt
@@ -125,7 +135,7 @@ if (NOT WIN32 AND NOT APPLE)
     set_target_properties(PrusaSlicer PROPERTIES OUTPUT_NAME "prusa-slicer")
 endif ()
 
-target_link_libraries(PrusaSlicer libslic3r cereal)
+target_link_libraries(PrusaSlicer libslic3r libcereal)
 if (APPLE)
 #    add_compile_options(-stdlib=libc++)
 #    add_definitions(-DBOOST_THREAD_DONT_USE_CHRONO -DBOOST_NO_CXX11_RVALUE_REFERENCES -DBOOST_THREAD_USES_MOVE)

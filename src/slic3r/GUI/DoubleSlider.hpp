@@ -17,6 +17,8 @@ class wxMenu;
 namespace Slic3r {
 
 using namespace CustomGCode;
+class PrintObject;
+class Layer;
 
 namespace DoubleSlider {
 
@@ -24,6 +26,15 @@ namespace DoubleSlider {
  * So, let use same value as a permissible error for layer height.
  */
 constexpr double epsilon() { return 0.0011; }
+
+// return true when areas are mostly equivalent
+bool equivalent_areas(const double& bottom_area, const double& top_area);
+
+// return true if color change was detected
+bool check_color_change(PrintObject* object, size_t frst_layer_id, size_t layers_cnt, bool check_overhangs,
+                        // what to do with detected color change
+                        // and return true when detection have to be desturbed
+                        std::function<bool(Layer*)> break_condition);
 
 // custom message the slider sends to its parent to notify a tick-change:
 wxDECLARE_EVENT(wxCUSTOMEVT_TICKSCHANGED, wxEvent);
@@ -104,7 +115,7 @@ class TickCodeInfo
     bool        m_suppress_plus     = false;
     bool        m_suppress_minus    = false;
     bool        m_use_default_colors= false;
-    int         m_default_color_idx = 0;
+//    int         m_default_color_idx = 0;
 
     std::vector<std::string>* m_colors {nullptr};
 
@@ -292,7 +303,7 @@ public:
 protected:
 
     void    render();
-    void    draw_focus_rect();
+    void    draw_focus_rect(wxDC& dc);
     void    draw_action_icon(wxDC& dc, const wxPoint pt_beg, const wxPoint pt_end);
     void    draw_scroll_line(wxDC& dc, const int lower_pos, const int higher_pos);
     void    draw_thumb(wxDC& dc, const wxCoord& pos_coord, const SelectedSlider& selection);
@@ -427,19 +438,36 @@ private:
     wxPen   GREY_PEN;
     wxPen   LIGHT_GREY_PEN;
 
+    wxPen   FOCUS_RECT_PEN;
+    wxBrush FOCUS_RECT_BRUSH;
+
     std::vector<wxPen*> m_line_pens;
     std::vector<wxPen*> m_segm_pens;
 
-    struct Ruler {
+    class Ruler {
+        wxWindow* m_parent{nullptr}; // m_parent is nullptr for Unused ruler
+                                     // in this case we will not init/update/render it  
+        // values to check if ruler has to be updated
+        double m_min_val;
+        double m_max_val;
+        double m_scroll_step;
+        size_t m_max_values_cnt;
+        int m_DPI;
+
+    public:
+
         double long_step;
         double short_step;
         std::vector<double> max_values;// max value for each object/instance in sequence print
                                        // > 1 for sequential print
 
-        void init(const std::vector<double>& values);
-        void update(wxWindow* win, const std::vector<double>& values, double scroll_step);
+        void set_parent(wxWindow* parent);
+        void update_dpi();
+        void init(const std::vector<double>& values, double scroll_step);
+        void update(const std::vector<double>& values, double scroll_step);
         bool is_ok() { return long_step > 0 && short_step > 0; }
         size_t count() { return max_values.size(); }
+        bool can_draw() { return m_parent != nullptr; }
     } m_ruler;
 };
 

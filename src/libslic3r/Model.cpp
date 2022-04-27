@@ -1,8 +1,10 @@
+#include "Model.hpp"
 #include "libslic3r.h"
+#include "BuildVolume.hpp"
 #include "Exception.hpp"
 #include "Model.hpp"
 #include "ModelArrange.hpp"
-#include "Geometry.hpp"
+#include "Geometry/ConvexHull.hpp"
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
@@ -158,13 +160,7 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
     if (!result)
         throw Slic3r::RuntimeError("Loading of a model file failed.");
 
-#if !ENABLE_SAVE_COMMANDS_ALWAYS_ENABLED
-    if (model.objects.empty())
-        throw Slic3r::RuntimeError("The supplied file couldn't be read because it's empty");
-#endif // !ENABLE_SAVE_COMMANDS_ALWAYS_ENABLED
-
-    for (ModelObject *o : model.objects)
-    {
+    for (ModelObject *o : model.objects) {
 //        if (boost::algorithm::iends_with(input_file, ".zip.amf"))
 //        {
 //            // we remove the .zip part of the extension to avoid it be added to filenames when exporting
@@ -179,6 +175,8 @@ Model Model::read_from_archive(const std::string& input_file, DynamicPrintConfig
 
     CustomGCode::update_custom_gcode_per_print_z_from_config(model.custom_gcode_per_print_z, config);
     CustomGCode::check_mode_for_custom_gcode_per_print_z(model.custom_gcode_per_print_z);
+
+    handle_legacy_sla(*config);
 
     return model;
 }
@@ -330,11 +328,11 @@ BoundingBoxf3 Model::bounding_box() const
     return bb;
 }
 
-unsigned int Model::update_print_volume_state(const BoundingBoxf3 &print_volume) 
+unsigned int Model::update_print_volume_state(const BuildVolume &build_volume)
 {
     unsigned int num_printable = 0;
-    for (ModelObject *model_object : this->objects)
-        num_printable += model_object->check_instances_print_volume_state(print_volume);
+    for (ModelObject* model_object : this->objects)
+        num_printable += model_object->update_instances_print_volume_state(build_volume);
     return num_printable;
 }
 
@@ -511,6 +509,22 @@ void Model::convert_from_meters(bool only_small_volumes)
                 v->source.is_converted_from_meters = true;
             }
         }
+}
+
+static constexpr const double zero_volume = 0.0000000001;
+
+int Model::removed_objects_with_zero_volume()
+{
+    if (objects.size() == 0)
+        return 0;
+
+    int removed = 0;
+    for (int i = int(objects.size()) - 1; i >= 0; i--)
+        if (objects[i]->get_object_stl_stats().volume < zero_volume) {
+            delete_object(size_t(i));
+            removed++;
+        }
+    return removed;
 }
 
 void Model::adjust_min_z()
@@ -889,7 +903,7 @@ indexed_triangle_set ModelObject::raw_indexed_triangle_set() const
             size_t j = out.indices.size();
             append(out.vertices, v->mesh().its.vertices);
             append(out.indices,  v->mesh().its.indices);
-            auto m = v->get_matrix();
+            const Transform3d& m = v->get_matrix();
             for (; i < out.vertices.size(); ++ i)
                 out.vertices[i] = (m * out.vertices[i].cast<double>()).cast<float>().eval();
             if (v->is_left_handed()) {
@@ -1204,10 +1218,10 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
         instances[instance]->get_mirror()
     );
 
-    z -= instances[instance]->get_offset()(2);
+    z -= instances[instance]->get_offset().z();
 
-    // Lower part per-instance bounding boxes
-    std::vector<BoundingBoxf3> lower_bboxes { instances.size() };
+    // Displacement (in instance coordinates) to be applied to place the upper parts
+    Vec3d local_displace = Vec3d::Zero();
 
     for (ModelVolume *volume : volumes) {
         const auto volume_matrix = volume->get_matrix();
@@ -1227,8 +1241,7 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
             if (attributes.has(ModelObjectCutAttribute::KeepLower))
                 lower->add_volume(*volume);
         }
-        else if (! volume->mesh().empty()) {
-            
+        else if (! volume->mesh().empty()) {            
             // Transform the mesh by the combined transformation matrix.
             // Flip the triangles in case the composite transformation is left handed.
 			TriangleMesh mesh(volume->mesh());
@@ -1268,13 +1281,10 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
 	    		assert(vol->config.id() != volume->config.id());
                 vol->set_material(volume->material_id(), *volume->material());
 
-                // Compute the lower part instances' bounding boxes to figure out where to place
-                // the upper part
-                if (attributes.has(ModelObjectCutAttribute::KeepUpper)) {
-                    for (size_t i = 0; i < instances.size(); i++) {
-                        lower_bboxes[i].merge(instances[i]->transform_mesh_bounding_box(lower_mesh, true));
-                    }
-                }
+                // Compute the displacement (in instance coordinates) to be applied to place the upper parts
+                // The upper part displacement is set to half of the lower part bounding box
+                // this is done in hope at least a part of the upper part will always be visible and draggable
+                local_displace = lower->full_raw_mesh_bounding_box().size().cwiseProduct(Vec3d(-0.5, -0.5, 0.0));
             }
         }
     }
@@ -1282,17 +1292,18 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
     ModelObjectPtrs res;
 
     if (attributes.has(ModelObjectCutAttribute::KeepUpper) && upper->volumes.size() > 0) {
-        upper->invalidate_bounding_box();
-        upper->center_around_origin();
+        if (!upper->origin_translation.isApprox(Vec3d::Zero()) && instances[instance]->get_offset().isApprox(Vec3d::Zero())) {
+            upper->center_around_origin();
+            upper->translate_instances(-upper->origin_translation);
+            upper->origin_translation = Vec3d::Zero();
+        }
 
         // Reset instance transformation except offset and Z-rotation
-        for (size_t i = 0; i < instances.size(); i++) {
+        for (size_t i = 0; i < instances.size(); ++i) {
             auto &instance = upper->instances[i];
             const Vec3d offset = instance->get_offset();
-            const double rot_z = instance->get_rotation()(2);
-            // The upper part displacement is set to half of the lower part bounding box
-            // this is done in hope at least a part of the upper part will always be visible and draggable
-            const Vec3d displace = lower_bboxes[i].size().cwiseProduct(Vec3d(-0.5, -0.5, 0.0));
+            const double rot_z = instance->get_rotation().z();
+            const Vec3d displace = Geometry::assemble_transform(Vec3d::Zero(), instance->get_rotation()) * local_displace;
 
             instance->set_transformation(Geometry::Transformation());
             instance->set_offset(offset + displace);
@@ -1302,14 +1313,16 @@ ModelObjectPtrs ModelObject::cut(size_t instance, coordf_t z, ModelObjectCutAttr
         res.push_back(upper);
     }
     if (attributes.has(ModelObjectCutAttribute::KeepLower) && lower->volumes.size() > 0) {
-        lower->invalidate_bounding_box();
-        lower->center_around_origin();
+        if (!lower->origin_translation.isApprox(Vec3d::Zero()) && instances[instance]->get_offset().isApprox(Vec3d::Zero())) {
+            lower->center_around_origin();
+            lower->translate_instances(-lower->origin_translation);
+            lower->origin_translation = Vec3d::Zero();
+        }
 
         // Reset instance transformation except offset and Z-rotation
         for (auto *instance : lower->instances) {
             const Vec3d offset = instance->get_offset();
-            const double rot_z = instance->get_rotation()(2);
-
+            const double rot_z = instance->get_rotation().z();
             instance->set_transformation(Geometry::Transformation());
             instance->set_offset(offset);
             instance->set_rotation(Vec3d(attributes.has(ModelObjectCutAttribute::FlipLower) ? Geometry::deg2rad(180.0) : 0.0, 0.0, rot_z));
@@ -1513,30 +1526,37 @@ double ModelObject::get_instance_max_z(size_t instance_idx) const
     return max_z + inst->get_offset(Z);
 }
 
-unsigned int ModelObject::check_instances_print_volume_state(const BoundingBoxf3& print_volume)
+unsigned int ModelObject::update_instances_print_volume_state(const BuildVolume &build_volume)
 {
     unsigned int num_printable = 0;
     enum {
-        INSIDE  = 1,
+        INSIDE = 1,
         OUTSIDE = 2
     };
-    for (ModelInstance *model_instance : this->instances) {
+    for (ModelInstance* model_instance : this->instances) {
         unsigned int inside_outside = 0;
-        for (const ModelVolume *vol : this->volumes)
+        for (const ModelVolume* vol : this->volumes)
             if (vol->is_model_part()) {
-                BoundingBoxf3 bb = vol->get_convex_hull().transformed_bounding_box(model_instance->get_matrix() * vol->get_matrix());
-                if (print_volume.contains(bb))
+                const Transform3d matrix = model_instance->get_matrix() * vol->get_matrix();
+                BuildVolume::ObjectState state = build_volume.object_state(vol->mesh().its, matrix.cast<float>(), true /* may be below print bed */);
+                if (state == BuildVolume::ObjectState::Inside)
+                    // Volume is completely inside.
                     inside_outside |= INSIDE;
-                else if (print_volume.intersects(bb))
-                    inside_outside |= INSIDE | OUTSIDE;
-                else
+                else if (state == BuildVolume::ObjectState::Outside)
+                    // Volume is completely outside.
                     inside_outside |= OUTSIDE;
+                else if (state == BuildVolume::ObjectState::Below) {
+                    // Volume below the print bed, thus it is completely outside, however this does not prevent the object to be printable
+                    // if some of its volumes are still inside the build volume.
+                } else
+                    // Volume colliding with the build volume.
+                    inside_outside |= INSIDE | OUTSIDE;
             }
-        model_instance->print_volume_state = 
-            (inside_outside == (INSIDE | OUTSIDE)) ? ModelInstancePVS_Partly_Outside :
-            (inside_outside == INSIDE) ? ModelInstancePVS_Inside : ModelInstancePVS_Fully_Outside;
+        model_instance->print_volume_state =
+            inside_outside == (INSIDE | OUTSIDE) ? ModelInstancePVS_Partly_Outside :
+            inside_outside == INSIDE ? ModelInstancePVS_Inside : ModelInstancePVS_Fully_Outside;
         if (inside_outside == INSIDE)
-            ++ num_printable;
+            ++num_printable;
     }
     return num_printable;
 }
@@ -1566,16 +1586,17 @@ void ModelObject::print_info() const
         cout << "open_edges = " << mesh.stats().open_edges << endl;
     
     if (mesh.stats().repaired()) {
-        if (mesh.stats().degenerate_facets > 0)
-            cout << "degenerate_facets = "  << mesh.stats().degenerate_facets << endl;
-        if (mesh.stats().edges_fixed > 0)
-            cout << "edges_fixed = "        << mesh.stats().edges_fixed       << endl;
-        if (mesh.stats().facets_removed > 0)
-            cout << "facets_removed = "     << mesh.stats().facets_removed    << endl;
-        if (mesh.stats().facets_reversed > 0)
-            cout << "facets_reversed = "    << mesh.stats().facets_reversed   << endl;
-        if (mesh.stats().backwards_edges > 0)
-            cout << "backwards_edges = "    << mesh.stats().backwards_edges   << endl;
+        const RepairedMeshErrors& stats = mesh.stats().repaired_errors;
+        if (stats.degenerate_facets > 0)
+            cout << "degenerate_facets = "  << stats.degenerate_facets << endl;
+        if (stats.edges_fixed > 0)
+            cout << "edges_fixed = "        << stats.edges_fixed       << endl;
+        if (stats.facets_removed > 0)
+            cout << "facets_removed = "     << stats.facets_removed    << endl;
+        if (stats.facets_reversed > 0)
+            cout << "facets_reversed = "    << stats.facets_reversed   << endl;
+        if (stats.backwards_edges > 0)
+            cout << "backwards_edges = "    << stats.backwards_edges   << endl;
     }
     cout << "number_of_parts =  " << mesh.stats().number_of_parts << endl;
     cout << "volume = "           << mesh.volume()                << endl;
@@ -1603,9 +1624,6 @@ std::string ModelObject::get_export_filename() const
 
 TriangleMeshStats ModelObject::get_object_stl_stats() const
 {
-    if (this->volumes.size() == 1)
-        return this->volumes[0]->mesh().stats();
-
     TriangleMeshStats full_stats;
     full_stats.volume = 0.f;
 
@@ -1616,15 +1634,12 @@ TriangleMeshStats ModelObject::get_object_stl_stats() const
 
         // initialize full_stats (for repaired errors)
         full_stats.open_edges           += stats.open_edges;
-        full_stats.degenerate_facets    += stats.degenerate_facets;
-        full_stats.edges_fixed          += stats.edges_fixed;
-        full_stats.facets_removed       += stats.facets_removed;
-        full_stats.facets_reversed      += stats.facets_reversed;
-        full_stats.backwards_edges      += stats.backwards_edges;
+        full_stats.repaired_errors.merge(stats.repaired_errors);
 
         // another used satistics value
         if (volume->is_model_part()) {
-            full_stats.volume           += stats.volume;
+            Transform3d trans = instances.empty() ? volume->get_matrix() : (volume->get_matrix() * instances[0]->get_matrix());
+            full_stats.volume           += stats.volume * std::fabs(trans.matrix().block(0, 0, 3, 3).determinant());
             full_stats.number_of_parts  += stats.number_of_parts;
         }
     }
@@ -1632,12 +1647,12 @@ TriangleMeshStats ModelObject::get_object_stl_stats() const
     return full_stats;
 }
 
-int ModelObject::get_mesh_errors_count(const int vol_idx /*= -1*/) const
+int ModelObject::get_repaired_errors_count(const int vol_idx /*= -1*/) const
 {
     if (vol_idx >= 0)
-        return this->volumes[vol_idx]->get_mesh_errors_count();
+        return this->volumes[vol_idx]->get_repaired_errors_count();
 
-    const TriangleMeshStats& stats = get_object_stl_stats();
+    const RepairedMeshErrors& stats = get_object_stl_stats().repaired_errors;
 
     return  stats.degenerate_facets + stats.edges_fixed     + stats.facets_removed +
             stats.facets_reversed + stats.backwards_edges;
@@ -1707,9 +1722,9 @@ void ModelVolume::calculate_convex_hull()
     assert(m_convex_hull.get());
 }
 
-int ModelVolume::get_mesh_errors_count() const
+int ModelVolume::get_repaired_errors_count() const
 {
-    const TriangleMeshStats &stats = this->mesh().stats();
+    const RepairedMeshErrors &stats = this->mesh().stats().repaired_errors;
 
     return  stats.degenerate_facets + stats.edges_fixed     + stats.facets_removed +
             stats.facets_reversed + stats.backwards_edges;
@@ -1766,18 +1781,17 @@ size_t ModelVolume::split(unsigned int max_extruders)
 
     size_t idx = 0;
     size_t ivolume = std::find(this->object->volumes.begin(), this->object->volumes.end(), this) - this->object->volumes.begin();
-    std::string name = this->name;
+    const std::string name = this->name;
 
     unsigned int extruder_counter = 0;
-    Vec3d offset = this->get_offset();
+    const Vec3d offset = this->get_offset();
 
     for (TriangleMesh &mesh : meshes) {
         if (mesh.empty())
             // Repair may have removed unconnected triangles, thus emptying the mesh.
             continue;
 
-        if (idx == 0)
-        {
+        if (idx == 0) {
             this->set_mesh(std::move(mesh));
             this->calculate_convex_hull();
             // Assign a new unique ID, so that a new GLVolume will be generated.
@@ -1796,7 +1810,19 @@ size_t ModelVolume::split(unsigned int max_extruders)
         this->object->volumes[ivolume]->m_is_splittable = 0;
         ++ idx;
     }
-    
+
+    // discard volumes for which the convex hull was not generated or is degenerate
+    size_t i = 0;
+    while (i < this->object->volumes.size()) {
+        const std::shared_ptr<const TriangleMesh> &hull = this->object->volumes[i]->get_convex_hull_shared_ptr();
+        if (hull == nullptr || hull->its.vertices.empty() || hull->its.indices.empty()) {
+            this->object->delete_volume(i);
+            --idx;
+            --i;
+        }
+        ++i;
+    }
+
     return idx;
 }
 
@@ -2238,7 +2264,7 @@ void check_model_ids_validity(const Model &model)
         for (const ModelInstance *model_instance : model_object->instances)
             check(model_instance->id());
     }
-    for (const auto mm : model.materials) {
+    for (const auto &mm : model.materials) {
         check(mm.second->id());
         check(mm.second->config.id());
     }

@@ -552,7 +552,7 @@ static CircleBed to_circle(const Point &center, const Points& points) {
     std::vector<double> vertex_distances;
     double avg_dist = 0;
     
-    for (auto pt : points)
+    for (const Point& pt : points)
     {
         double distance = distance_to(center, pt);
         vertex_distances.push_back(distance);
@@ -580,11 +580,6 @@ static void process_arrangeable(const ArrangePolygon &arrpoly,
     Polygon        p        = arrpoly.poly.contour;
     const Vec2crd &offs     = arrpoly.translation;
     double         rotation = arrpoly.rotation;
-
-    // This fixes:
-    // https://github.com/prusa3d/PrusaSlicer/issues/2209
-    if (p.points.size() < 3)
-        return;
 
     outp.emplace_back(std::move(p));
     outp.back().rotation(rotation);

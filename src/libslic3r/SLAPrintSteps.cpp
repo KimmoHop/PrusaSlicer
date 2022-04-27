@@ -215,6 +215,22 @@ struct FaceHash {
     }
 };
 
+static void exclude_neighbors(const Vec3i                &face,
+                              std::vector<bool>          &mask,
+                              const indexed_triangle_set &its,
+                              const VertexFaceIndex      &index,
+                              size_t                      recursions)
+{
+    for (int i = 0; i < 3; ++i) {
+        const auto &neighbors_range = index[face(i)];
+        for (size_t fi_n : neighbors_range) {
+            mask[fi_n] = true;
+            if (recursions > 0)
+                exclude_neighbors(its.indices[fi_n], mask, its, index, recursions - 1);
+        }
+    }
+}
+
 // Create exclude mask for triangle removal inside hollowed interiors.
 // This is necessary when the interior is already part of the mesh which was
 // drilled using CGAL mesh boolean operation. Excluded will be the triangles
@@ -231,15 +247,6 @@ static std::vector<bool> create_exclude_mask(
 
     VertexFaceIndex neighbor_index{its};
 
-    auto exclude_neighbors = [&neighbor_index, &exclude_mask](const Vec3i &face)
-    {
-        for (int i = 0; i < 3; ++i) {
-            const auto &neighbors_range = neighbor_index[face(i)];
-            for (size_t fi_n : neighbors_range)
-                exclude_mask[fi_n] = true;
-        }
-    };
-
     for (size_t fi = 0; fi < its.indices.size(); ++fi) {
         auto &face = its.indices[fi];
 
@@ -249,7 +256,7 @@ static std::vector<bool> create_exclude_mask(
         }
 
         if (exclude_mask[fi]) {
-            exclude_neighbors(face);
+            exclude_neighbors(face, exclude_mask, its, neighbor_index, 1);
             continue;
         }
 
@@ -294,7 +301,7 @@ static std::vector<bool> create_exclude_mask(
 
             if (D_hole < D_tol && std::abs(dot) < normal_angle_tol) {
                 exclude_mask[fi] = true;
-                exclude_neighbors(face);
+                exclude_neighbors(face, exclude_mask, its, neighbor_index, 1);
             }
         }
     }
@@ -559,7 +566,7 @@ void SLAPrint::Steps::slice_model(SLAPrintObject &po)
 
     if(po.m_config.supports_enable.getBool() || po.m_config.pad_enable.getBool())
     {
-        po.m_supportdata.reset(new SLAPrintObject::SupportData(mesh));
+        po.m_supportdata.reset(new SLAPrintObject::SupportData(po.get_mesh_to_print()));
     }
 }
 
@@ -570,10 +577,8 @@ void SLAPrint::Steps::support_points(SLAPrintObject &po)
     // If supports are disabled, we can skip the model scan.
     if(!po.m_config.supports_enable.getBool()) return;
 
-    const TriangleMesh &mesh = po.get_mesh_to_slice();
-
     if (!po.m_supportdata)
-        po.m_supportdata.reset(new SLAPrintObject::SupportData(mesh));
+        po.m_supportdata.reset(new SLAPrintObject::SupportData(po.get_mesh_to_print()));
 
     const ModelObject& mo = *po.m_model_object;
 
@@ -1046,7 +1051,7 @@ void SLAPrint::Steps::merge_slices_and_eval_stats() {
 // Rasterizing the model objects, and their supports
 void SLAPrint::Steps::rasterize()
 {
-    if(canceled() || !m_print->m_printer) return;
+    if(canceled() || !m_print->m_archiver) return;
 
     // coefficient to map the rasterization state (0-99) to the allocated
     // portion (slot) of the process state
@@ -1091,7 +1096,7 @@ void SLAPrint::Steps::rasterize()
     if(canceled()) return;
 
     // Print all the layers in parallel
-    m_print->m_printer->draw_layers(m_print->m_printer_input.size(), lvlfn,
+    m_print->m_archiver->draw_layers(m_print->m_printer_input.size(), lvlfn,
                                     [this]() { return canceled(); }, ex_tbb);
 }
 

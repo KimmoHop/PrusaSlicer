@@ -46,10 +46,6 @@ using Slic3r::GUI::Config::SnapshotDB;
 namespace Slic3r {
 
 
-enum {
-	SLIC3R_VERSION_BODY_MAX = 256,
-};
-
 static const char *INDEX_FILENAME = "index.idx";
 static const char *TMP_EXTENSION = ".download";
 
@@ -139,10 +135,6 @@ struct Updates
 	std::vector<Update> updates;
 };
 
-
-wxDEFINE_EVENT(EVT_SLIC3R_VERSION_ONLINE, wxCommandEvent);
-
-
 struct PresetUpdater::priv
 {
 	std::vector<Index> index_db;
@@ -166,7 +158,6 @@ struct PresetUpdater::priv
 	void set_download_prefs(AppConfig *app_config);
 	bool get_file(const std::string &url, const fs::path &target_path) const;
 	void prune_tmps() const;
-	void sync_version() const;
 	void sync_config(const VendorMap vendors);
 
 	void check_install_indices() const;
@@ -191,7 +182,7 @@ PresetUpdater::priv::priv()
 // Pull relevant preferences from AppConfig
 void PresetUpdater::priv::set_download_prefs(AppConfig *app_config)
 {
-	enabled_version_check = app_config->get("version_check") == "1";
+	enabled_version_check = app_config->get("notify_release") != "none";
 	version_check_url = app_config->version_check_url();
 	enabled_config_update = app_config->get("preset_update") == "1" && !app_config->legacy_datadir();
 }
@@ -239,46 +230,6 @@ void PresetUpdater::priv::prune_tmps() const
 			BOOST_LOG_TRIVIAL(debug) << "Cache prune: " << dir_entry.path().string();
 			fs::remove(dir_entry.path());
 		}
-}
-
-// Get Slic3rPE version available online, save in AppConfig.
-void PresetUpdater::priv::sync_version() const
-{
-	if (! enabled_version_check) { return; }
-
-	BOOST_LOG_TRIVIAL(info) << format("Downloading %1% online version from: `%2%`", SLIC3R_APP_NAME, version_check_url);
-
-	Http::get(version_check_url)
-		.size_limit(SLIC3R_VERSION_BODY_MAX)
-		.on_progress([this](Http::Progress, bool &cancel) {
-			cancel = this->cancel;
-		})
-		.on_error([&](std::string body, std::string error, unsigned http_status) {
-			(void)body;
-			BOOST_LOG_TRIVIAL(error) << format("Error getting: `%1%`: HTTP %2%, %3%",
-				version_check_url,
-				http_status,
-				error);
-		})
-		.on_complete([&](std::string body, unsigned /* http_status */) {
-			boost::trim(body);
-			const auto nl_pos = body.find_first_of("\n\r");
-			if (nl_pos != std::string::npos) {
-				body.resize(nl_pos);
-			}
-
-			if (! Semver::parse(body)) {
-				BOOST_LOG_TRIVIAL(warning) << format("Received invalid contents from `%1%`: Not a correct semver: `%2%`", SLIC3R_APP_NAME, body);
-				return;
-			}
-
-			BOOST_LOG_TRIVIAL(info) << format("Got %1% online version: `%2%`. Sending to GUI thread...", SLIC3R_APP_NAME, body);
-
-			wxCommandEvent* evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
-			evt->SetString(GUI::from_u8(body));
-			GUI::wxGetApp().QueueEvent(evt);
-		})
-		.perform_sync();
 }
 
 // Download vendor indices. Also download new bundles if an index indicates there's a new one available.
@@ -691,15 +642,14 @@ void PresetUpdater::sync(PresetBundle *preset_bundle)
 
     p->thread = std::thread([this, vendors]() {
 		this->p->prune_tmps();
-		this->p->sync_version();
 		this->p->sync_config(std::move(vendors));
     });
 }
 
 void PresetUpdater::slic3r_update_notify()
 {
-	if (! p->enabled_version_check) { return; }
-
+	if (! p->enabled_version_check)
+		return;
 	auto* app_config = GUI::wxGetApp().app_config;
 	const auto ver_online_str = app_config->get("version_online");
 	const auto ver_online = Semver::parse(ver_online_str);
@@ -711,7 +661,7 @@ void PresetUpdater::slic3r_update_notify()
 			GUI::MsgUpdateSlic3r notification(Slic3r::SEMVER, *ver_online);
 			notification.ShowModal();
 			if (notification.disable_version_check()) {
-				app_config->set("version_check", "0");
+				app_config->set("notify_release", "none");
 				p->enabled_version_check = false;
 			}
 		}
@@ -724,7 +674,7 @@ static bool reload_configs_update_gui()
 {
 	wxString header = _L("Configuration Updates causes a lost of preset modification.\n"
 						 "So, check unsaved changes and save them if necessary.");
-	if (!GUI::wxGetApp().check_and_save_current_preset_changes(_L("Updater is processing"), header, false ))
+	if (!GUI::wxGetApp().check_and_save_current_preset_changes(_L("Updating"), header, false ))
 		return false;
 
 	// Reload global configuration
@@ -900,6 +850,11 @@ void PresetUpdater::on_update_notification_confirm()
 	else {
 		BOOST_LOG_TRIVIAL(info) << "User refused the update";
 	}	
+}
+
+bool PresetUpdater::version_check_enabled() const
+{
+	return p->enabled_version_check;
 }
 
 }

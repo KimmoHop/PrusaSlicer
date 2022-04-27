@@ -11,6 +11,7 @@
 
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/Color.hpp"
 #include "format.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
@@ -57,9 +58,8 @@ static std::string get_icon_name(Preset::Type type, PrinterTechnology pt) {
 
 static std::string def_text_color()
 {
-    wxColour def_colour = wxGetApp().get_label_clr_default();//wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-    auto clr_str = wxString::Format(wxT("#%02X%02X%02X"), def_colour.Red(), def_colour.Green(), def_colour.Blue());
-    return clr_str.ToStdString();
+    wxColour def_colour = wxGetApp().get_label_clr_default();
+    return encode_color(ColorRGB(def_colour.Red(), def_colour.Green(), def_colour.Blue()));
 }
 static std::string grey     = "#808080";
 static std::string orange   = "#ed6b21";
@@ -124,8 +124,8 @@ wxBitmap ModelNode::get_bitmap(const wxString& color)
     const int icon_height   = lround(1.6 * em);
 
     BitmapCache bmp_cache;
-    unsigned char rgb[3];
-    BitmapCache::parse_color(into_u8(color), rgb);
+    ColorRGB rgb;
+    decode_color(into_u8(color), rgb);
     // there is no need to scale created solid bitmap
 #ifndef __linux__
     return bmp_cache.mksolid(icon_width, icon_height, rgb, true);
@@ -656,6 +656,7 @@ void DiffViewCtrl::Clear()
 {
     model->Clear();
     m_items_map.clear();
+    m_has_long_strings = false;
 }
 
 wxString DiffViewCtrl::get_short_string(wxString full_string)
@@ -891,18 +892,14 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection* dependent_
         {
             if (!evt.IsChecked())
                 return;
-            wxString preferences_item = m_app_config_key == "default_action_on_new_project"     ? _L("Ask for unsaved changes when creating new project") : 
-                                        m_app_config_key == "default_action_on_select_preset"   ? _L("Ask for unsaved changes when selecting new preset") :
-                                                                                                  _L("Ask for unsaved changes when ??closing application??") ;
-            wxString action = m_app_config_key == "default_action_on_new_project"   ? _L("You will not be asked about the unsaved changes the next time you create new project") : 
-                              m_app_config_key == "default_action_on_select_preset" ? _L("You will not be asked about the unsaved changes the next time you switch a preset") :
-                                                                                      _L("You will not be asked about the unsaved changes the next time you: \n"
-                                                                                            "- close the application,\n"
-                                                                                            "- load project,\n"
-                                                                                            "- process Undo / Redo with change of print technologie,\n"
-                                                                                            "- take/load snapshot,\n"
-                                                                                            "- load config file/bundle,\n"
-                                                                                            "- export config_bundle") ;
+            wxString preferences_item = m_app_config_key == "default_action_on_new_project"     ? _L("Ask for unsaved changes in presets when creating new project") :
+                                        m_app_config_key == "default_action_on_select_preset"   ? _L("Ask for unsaved changes in presets when selecting new preset") :
+                                                                                                  _L("Ask to save unsaved changes in presets when closing the application or when loading a new project") ;
+            wxString action = m_app_config_key == "default_action_on_new_project"   ? _L("You will not be asked about the unsaved changes in presets the next time you create new project") : 
+                              m_app_config_key == "default_action_on_select_preset" ? _L("You will not be asked about the unsaved changes in presets the next time you switch a preset") :
+                                                                                      _L("You will not be asked about the unsaved changes in presets the next time you: \n"
+						                                                                    "- Closing PrusaSlicer while some presets are modified,\n"
+						                                                                    "- Loading a new project while some presets are modified") ;
             wxString msg = _L("PrusaSlicer will remember your action.") + "\n\n" + action + "\n\n" +
                            format_wxstr(_L("Visit \"Preferences\" and check \"%1%\"\nto be asked about unsaved changes again."), preferences_item);
     
@@ -931,7 +928,7 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection* dependent_
 
 void UnsavedChangesDialog::show_info_line(Action action, std::string preset_name)
 {
-    if (action == Action::Undef && !m_has_long_strings)
+    if (action == Action::Undef && !m_tree->has_long_strings())
         m_info_line->Hide();
     else {
         wxString text;
@@ -1034,7 +1031,7 @@ bool UnsavedChangesDialog::save(PresetCollection* dependent_presets, bool show_s
 wxString get_string_from_enum(const std::string& opt_key, const DynamicPrintConfig& config, bool is_infill = false)
 {
     const ConfigOptionDef& def = config.def()->options.at(opt_key);
-    const std::vector<std::string>& names = def.enum_labels;//ConfigOptionEnum<T>::get_enum_names();
+    const std::vector<std::string>& names = def.enum_labels.empty() ? def.enum_values : def.enum_labels;
     int val = config.option(opt_key)->getInt();
 
     // Each infill doesn't use all list of infill declared in PrintConfig.hpp.
@@ -1158,6 +1155,15 @@ static wxString get_string_value(std::string opt_key, const DynamicPrintConfig& 
                 for (size_t id = 0; id < strings->size(); id++)
                     out += from_u8(strings->get_at(id)) + "\n";
                 out.RemoveLast(1);
+                return out;
+            }
+            if (opt_key == "gcode_substitutions") {
+                if (!strings->empty())
+                    for (size_t id = 0; id < strings->size(); id += 4)
+                        out +=  from_u8(strings->get_at(id))     + ";\t" + 
+                                from_u8(strings->get_at(id + 1)) + ";\t" + 
+                                from_u8(strings->get_at(id + 2)) + ";\t" +
+                                from_u8(strings->get_at(id + 3)) + ";\n";
                 return out;
             }
             if (!strings->empty() && opt_idx < strings->values.size())
@@ -1445,7 +1451,7 @@ DiffPresetDialog::DiffPresetDialog(MainFrame* mainframe)
     m_preset_bundle_left  = std::make_unique<PresetBundle>(*wxGetApp().preset_bundle);
     m_preset_bundle_right = std::make_unique<PresetBundle>(*wxGetApp().preset_bundle);
 
-    m_top_info_line = new wxStaticText(this, wxID_ANY, "Select presets to compare");
+    m_top_info_line = new wxStaticText(this, wxID_ANY, _L("Select presets to compare"));
     m_top_info_line->SetFont(wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).Bold());
 
     m_bottom_info_line = new wxStaticText(this, wxID_ANY, "");
@@ -1494,7 +1500,7 @@ DiffPresetDialog::DiffPresetDialog(MainFrame* mainframe)
         });
     }
 
-    m_show_all_presets = new wxCheckBox(this, wxID_ANY, _L("Show all preset (including incompatible)"));
+    m_show_all_presets = new wxCheckBox(this, wxID_ANY, _L("Show all presets (including incompatible)"));
     m_show_all_presets->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
         bool show_all = m_show_all_presets->GetValue();
         for (auto preset_combos : m_preset_combos) {
@@ -1518,8 +1524,8 @@ DiffPresetDialog::DiffPresetDialog(MainFrame* mainframe)
     topSizer->Add(m_top_info_line, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, 2 * border);
     topSizer->Add(presets_sizer, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(m_show_all_presets, 0, wxEXPAND | wxALL, border);
-    topSizer->Add(m_bottom_info_line, 0, wxEXPAND | wxALL, 2 * border);
     topSizer->Add(m_tree, 1, wxEXPAND | wxALL, border);
+    topSizer->Add(m_bottom_info_line, 0, wxEXPAND | wxALL, 2 * border);
 
     this->SetMinSize(wxSize(80 * em, 30 * em));
     this->SetSizer(topSizer);
@@ -1555,7 +1561,7 @@ void DiffPresetDialog::update_bundles_from_app()
 
 void DiffPresetDialog::show(Preset::Type type /* = Preset::TYPE_INVALID*/)
 {
-    this->SetTitle(type == Preset::TYPE_INVALID ? _L("Compare Presets") : format_wxstr(_L("Compare %1% Presets"), wxGetApp().get_tab(type)->name()));
+    this->SetTitle(_L("Compare Presets"));
     m_view_type = type;
 
     update_bundles_from_app();
@@ -1628,7 +1634,7 @@ void DiffPresetDialog::update_tree()
         const DynamicPrintConfig& right_congig  = right_preset->config;
 
         if (left_pt != right_preset->printer_technology()) {
-            bottom_info = _L("Comparable printer presets has different printer technology");
+            bottom_info = _L("Compared presets has different printer technology");
             preset_combos.equal_bmp->SetBitmap_(ScalableBitmap(this, "question"));
             preset_combos.equal_bmp->SetToolTip(bottom_info);
             continue;
@@ -1651,7 +1657,7 @@ void DiffPresetDialog::update_tree()
         show_tree = true;
         preset_combos.equal_bmp->SetBitmap_(ScalableBitmap(this, "not_equal"));
         preset_combos.equal_bmp->SetToolTip(_L("Presets are different.\n"
-                                               "Click this button to select the same as left preset for the right preset."));
+                                               "Click this button to select the same preset for the right and left preset."));
 
         m_tree->model->AddPreset(type, "\"" + from_u8(left_preset->name) + "\" vs \"" + from_u8(right_preset->name) + "\"", left_pt);
 
@@ -1684,12 +1690,17 @@ void DiffPresetDialog::update_tree()
                 left_val, right_val, category_icon_map.at(option.category));
         }
     }
+    
+    if (m_tree->has_long_strings())
+        bottom_info = _L("Some fields are too long to fit. Right mouse click reveals the full text.");
 
     bool tree_was_shown = m_tree->IsShown();
     m_tree->Show(show_tree);
-    if (!show_tree)
+
+    bool show_bottom_info = !show_tree || m_tree->has_long_strings();
+    if (show_bottom_info)
         m_bottom_info_line->SetLabel(bottom_info);
-    m_bottom_info_line->Show(!show_tree);
+    m_bottom_info_line->Show(show_bottom_info);
 
     if (tree_was_shown == m_tree->IsShown())
         Layout();

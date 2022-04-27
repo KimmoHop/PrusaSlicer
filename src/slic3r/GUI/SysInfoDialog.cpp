@@ -15,6 +15,7 @@
 #include "MainFrame.hpp"
 #include "wxExtensions.hpp"
 #include "../libslic3r/BlacklistedLibraryCheck.hpp"
+#include "../libslic3r/Color.hpp"
 #include "format.hpp"
 
 #ifdef _WIN32
@@ -94,7 +95,7 @@ SysInfoDialog::SysInfoDialog()
 	main_sizer->Add(hsizer, 1, wxEXPAND | wxALL, 10);
 
     // logo
-    m_logo_bmp = ScalableBitmap(this, wxGetApp().is_editor() ? "PrusaSlicer_192px.png" : "PrusaSlicer-gcodeviewer_192px.png", 192);
+    m_logo_bmp = ScalableBitmap(this, wxGetApp().logo_name(), 192);
     m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bmp.bmp());
 	hsizer->Add(m_logo, 0, wxALIGN_CENTER_VERTICAL);
     
@@ -113,9 +114,9 @@ SysInfoDialog::SysInfoDialog()
 
     // main_info_text
     wxFont font = get_default_font(this);
-    const auto text_clr = wxGetApp().get_label_clr_default();//wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-    auto text_clr_str = wxString::Format(wxT("#%02X%02X%02X"), text_clr.Red(), text_clr.Green(), text_clr.Blue());
-    auto bgr_clr_str = wxString::Format(wxT("#%02X%02X%02X"), bgr_clr.Red(), bgr_clr.Green(), bgr_clr.Blue());
+    const auto text_clr = wxGetApp().get_label_clr_default();
+    auto text_clr_str = encode_color(ColorRGB(text_clr.Red(), text_clr.Green(), text_clr.Blue()));
+    auto bgr_clr_str = encode_color(ColorRGB(bgr_clr.Red(), bgr_clr.Green(), bgr_clr.Blue()));
 
     const int fs = font.GetPointSize() - 1;
     int size[] = { static_cast<int>(fs*1.5), static_cast<int>(fs*1.4), static_cast<int>(fs*1.3), fs, fs, fs, fs };
@@ -158,7 +159,7 @@ SysInfoDialog::SysInfoDialog()
             "</body>"
             "</html>", bgr_clr_str, text_clr_str, text_clr_str,
             blacklisted_libraries_message,
-            get_mem_info(true), wxGetApp().get_gl_info(true, true),
+            get_mem_info(true), wxGetApp().get_gl_info(false),
             "<b>" + _L("Eigen vectorization supported:") + "</b> " + Eigen::SimdInstructionSetsInUse());
 
         m_opengl_info_html->SetPage(text);
@@ -215,7 +216,7 @@ void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
 void SysInfoDialog::onCopyToClipboard(wxEvent &)
 {
     wxTheClipboard->Open();
-    const auto text = get_main_info(false) + "\n" + wxGetApp().get_gl_info(false, true);
+    const auto text = get_main_info(false) + "\n" + wxGetApp().get_gl_info(true);
     wxTheClipboard->SetData(new wxTextDataObject(text));
     wxTheClipboard->Close();
 }

@@ -74,7 +74,8 @@ const char* GCodeReader::parse_line_internal(const char *ptr, const char *end, G
             if (axis != NUM_AXES_WITH_UNKNOWN) {
                 // Try to parse the numeric value.
                 double v;
-                auto [pend, ec] = fast_float::from_chars(++ c, end, v);
+                c = skip_whitespaces(++c);
+                auto [pend, ec] = fast_float::from_chars(c, end, v);
                 if (pend != c && is_end_of_word(*pend)) {
                     // The axis value has been parsed correctly.
                     if (axis != UNKNOWN_AXIS)
@@ -152,7 +153,7 @@ bool GCodeReader::parse_file_raw_internal(const std::string &filename, ParseLine
             auto it_end = it;
             for (; it_end != it_bufend && ! (eol = *it_end == '\r' || *it_end == '\n'); ++ it_end)
                 if (*it_end == '\n')
-                    line_end_callback((it_end - buffer.begin()) + 1);
+                    line_end_callback(file_pos + (it_end - buffer.begin()) + 1);
             // End of line is indicated also if end of file was reached.
             eol |= eof && it_end == it_bufend;
             if (eol) {
@@ -173,7 +174,7 @@ bool GCodeReader::parse_file_raw_internal(const std::string &filename, ParseLine
             if (it != it_bufend && *it == '\r')
                 ++ it;
             if (it != it_bufend && *it == '\n') {
-                line_end_callback((it - buffer.begin()) + 1);
+                line_end_callback(file_pos + (it - buffer.begin()) + 1);
                 ++ it;
             }
         }

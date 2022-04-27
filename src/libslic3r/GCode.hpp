@@ -10,6 +10,7 @@
 #include "PrintConfig.hpp"
 #include "GCode/AvoidCrossingPerimeters.hpp"
 #include "GCode/CoolingBuffer.hpp"
+#include "GCode/FindReplace.hpp"
 #include "GCode/SpiralVase.hpp"
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
@@ -54,9 +55,9 @@ public:
     Polyline path;
     
     Wipe() : enable(false) {}
-    bool has_path() const { return !this->path.points.empty(); }
-    void reset_path() { this->path = Polyline(); }
-    std::string wipe(GCode &gcodegen, bool toolchange = false);
+    bool has_path() const { return ! this->path.empty(); }
+    void reset_path() { this->path.clear(); }
+    std::string wipe(GCode &gcodegen, bool toolchange);
 };
 
 class WipeTowerIntegration {
@@ -143,14 +144,17 @@ public:
 
     // throws std::runtime_exception on error,
     // throws CanceledException through print->throw_if_canceled().
-    void            do_export(Print* print, const char* path, GCodeProcessor::Result* result = nullptr, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    void            do_export(Print* print, const char* path, GCodeProcessorResult* result = nullptr, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
 
     // Exported for the helper classes (OozePrevention, Wipe) and for the Perl binding for unit tests.
     const Vec2d&    origin() const { return m_origin; }
     void            set_origin(const Vec2d &pointf);
     void            set_origin(const coordf_t x, const coordf_t y) { this->set_origin(Vec2d(x, y)); }
     const Point&    last_pos() const { return m_last_pos; }
+    // Convert coordinates of the active object to G-code coordinates, possibly adjusted for extruder offset.
     Vec2d           point_to_gcode(const Point &point) const;
+    // Convert coordinates of the active object to G-code coordinates, possibly adjusted for extruder offset and quantized to G-code resolution.
+    Vec2d           point_to_gcode_quantized(const Point &point) const;
     Point           gcode_to_point(const Vec2d &point) const;
     const FullPrintConfig &config() const { return m_config; }
     const Layer*    layer() const { return m_layer; }
@@ -189,6 +193,13 @@ private:
         GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
         ~GCodeOutputStream() { this->close(); }
 
+        // Set a find-replace post-processor to modify the G-code before GCodePostProcessor.
+        // It is being set to null inside process_layers(), because the find-replace process
+        // is being called on a secondary thread to improve performance.
+        void set_find_replace(GCodeFindReplace *find_replace, bool enabled) { m_find_replace_backup = find_replace; m_find_replace = enabled ? find_replace : nullptr; }
+        void find_replace_enable() { m_find_replace = m_find_replace_backup; }
+        void find_replace_supress() { m_find_replace = nullptr; }
+
         bool is_open() const { return f; }
         bool is_error() const;
         
@@ -208,8 +219,12 @@ private:
         void write_format(const char* format, ...);
 
     private:
-        FILE *f = nullptr;
-        GCodeProcessor &m_processor;
+        FILE             *f { nullptr };
+        // Find-replace post-processor to be called before GCodePostProcessor.
+        GCodeFindReplace *m_find_replace { nullptr };
+        // If suppressed, the backoup holds m_find_replace.
+        GCodeFindReplace *m_find_replace_backup { nullptr };
+        GCodeProcessor   &m_processor;
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
 
@@ -259,10 +274,10 @@ private:
     void            set_extruders(const std::vector<unsigned int> &extruder_ids);
     std::string     preamble();
     std::string     change_layer(coordf_t print_z);
-    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1., std::unique_ptr<EdgeGrid::Grid> *lower_layer_edge_grid = nullptr);
-    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1., std::unique_ptr<EdgeGrid::Grid> *lower_layer_edge_grid = nullptr);
-    std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
-    std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
+    std::string     extrude_entity(const ExtrusionEntity &entity, const std::string_view description, double speed = -1.);
+    std::string     extrude_loop(ExtrusionLoop loop, const std::string_view description, double speed = -1.);
+    std::string     extrude_multi_path(ExtrusionMultiPath multipath, const std::string_view description, double speed = -1.);
+    std::string     extrude_path(ExtrusionPath path, const std::string_view description, double speed = -1.);
 
     // Extruding multiple objects with soluble / non-soluble / combined supports
     // on a multi-material printer, trying to minimize tool switches.
@@ -327,7 +342,7 @@ private:
 		// For sequential print, the instance of the object to be printing has to be defined.
 		const size_t                     				 single_object_instance_idx);
 
-    std::string     extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, std::unique_ptr<EdgeGrid::Grid> &lower_layer_edge_grid);
+    std::string     extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region);
     std::string     extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection &support_fills);
 
@@ -345,6 +360,8 @@ private:
        methods. */
     Vec2d                               m_origin;
     FullPrintConfig                     m_config;
+    // scaled G-code resolution
+    double                              m_scaled_resolution;
     GCodeWriter                         m_writer;
     PlaceholderParser                   m_placeholder_parser;
     // For random number generator etc.
@@ -391,6 +408,7 @@ private:
 
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;
+    std::unique_ptr<GCodeFindReplace>   m_find_replace;
 #ifdef HAS_PRESSURE_EQUALIZER
     std::unique_ptr<PressureEqualizer>  m_pressure_equalizer;
 #endif /* HAS_PRESSURE_EQUALIZER */
@@ -410,7 +428,7 @@ private:
     // Processor
     GCodeProcessor m_processor;
 
-    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
+    std::string _extrude(const ExtrusionPath &path, const std::string_view description, double speed = -1);
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
     void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);
     void _print_first_layer_extruder_temperatures(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);

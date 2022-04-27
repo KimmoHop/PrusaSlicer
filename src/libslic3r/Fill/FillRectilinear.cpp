@@ -402,19 +402,21 @@ public:
                 hole.rotate(angle);
         }
 
-        double mitterLimit = 3.;
+        double miterLimit = DefaultMiterLimit;
         // for the infill pattern, don't cut the corners.
         // default miterLimt = 3
-        //double mitterLimit = 10.;
-        assert(aoffset1 < 0);
+        //double miterLimit = 10.;
+        // FIXME: Resolve properly the cases when it is constructed with aoffset1 = 0 and aoffset2 = 0,
+        //        that is used in sample_grid_pattern() for Lightning infill.
+        // assert(aoffset1 < 0);
         assert(aoffset2 <= 0);
-        assert(aoffset2 == 0 || aoffset2 < aoffset1);
+        // assert(aoffset2 == 0 || aoffset2 < aoffset1);
 //        bool sticks_removed = 
         remove_sticks(polygons_src);
 //        if (sticks_removed) BOOST_LOG_TRIVIAL(error) << "Sticks removed!";
-        polygons_outer = offset(polygons_src, float(aoffset1), ClipperLib::jtMiter, mitterLimit);
+        polygons_outer = aoffset1 == 0 ? polygons_src : offset(polygons_src, float(aoffset1), ClipperLib::jtMiter, miterLimit);
         if (aoffset2 < 0)
-            polygons_inner = offset(polygons_outer, float(aoffset2 - aoffset1), ClipperLib::jtMiter, mitterLimit);
+            polygons_inner = shrink(polygons_outer, float(aoffset1 - aoffset2), ClipperLib::jtMiter, miterLimit);
 		// Filter out contours with zero area or small area, contours with 2 points only.
         const double min_area_threshold = 0.01 * aoffset2 * aoffset2;
         remove_small(polygons_outer, min_area_threshold);
@@ -2391,7 +2393,7 @@ static std::vector<MonotonicRegionLink> chain_monotonic_regions(
 
     // Probability (unnormalized) of traversing a link between two monotonic regions.
 	auto path_probability = [
-#ifndef __APPLE__
+#if !defined(__APPLE__) && !defined(__clang__)
         // clang complains when capturing constexpr constants.
         pheromone_alpha, pheromone_beta
 #endif // __APPLE__
@@ -3041,5 +3043,40 @@ Polylines FillSupportBase::fill_surface(const Surface *surface, const FillParams
     return polylines_out;
 }
 
-} // namespace Slic3r
+Points sample_grid_pattern(const ExPolygon &expolygon, coord_t spacing)
+{
+    ExPolygonWithOffset poly_with_offset(expolygon, 0, 0, 0);
+    BoundingBox bounding_box = poly_with_offset.bounding_box_src();
+    std::vector<SegmentedIntersectionLine> segs = slice_region_by_vertical_lines(
+        poly_with_offset, 
+        (bounding_box.max.x() - bounding_box.min.x() + spacing - 1) / spacing, 
+        bounding_box.min.x(),
+        spacing);
 
+    Points out;
+    for (const SegmentedIntersectionLine &sil : segs) {
+        for (size_t i = 0; i < sil.intersections.size(); i += 2) {
+            coord_t a = sil.intersections[i].pos();
+            coord_t b = sil.intersections[i + 1].pos();
+            for (coord_t y = a - (a % spacing) - spacing; y < b; y += spacing)
+                if (y > a)
+                    out.emplace_back(sil.pos, y);
+        }
+    }
+    return out;
+}
+
+Points sample_grid_pattern(const ExPolygons &expolygons, coord_t spacing)
+{
+    Points out;
+    for (const ExPolygon &expoly : expolygons)
+        append(out, sample_grid_pattern(expoly, spacing));
+    return out;
+}
+
+Points sample_grid_pattern(const Polygons &polygons, coord_t spacing)
+{
+    return sample_grid_pattern(union_ex(polygons), spacing);
+}
+
+} // namespace Slic3r

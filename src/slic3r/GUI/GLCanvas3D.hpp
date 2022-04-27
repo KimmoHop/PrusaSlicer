@@ -39,6 +39,7 @@ class wxGLContext;
 namespace Slic3r {
 
 class BackgroundSlicingProcess;
+class BuildVolume;
 struct ThumbnailData;
 struct ThumbnailsParams;
 class ModelObject;
@@ -50,30 +51,31 @@ namespace CustomGCode { struct Item; }
 
 namespace GUI {
 
+class Bed3D;
+
 #if ENABLE_RETINA_GL
 class RetinaHelper;
 #endif
 
 class Size
 {
-    int m_width;
-    int m_height;
-    float m_scale_factor;
+    int m_width{ 0 };
+    int m_height{ 0 };
+    float m_scale_factor{ 1.0f };
 
 public:
-    Size();
-    Size(int width, int height, float scale_factor = 1.0);
+    Size() = default;
+    Size(int width, int height, float scale_factor = 1.0f) : m_width(width), m_height(height), m_scale_factor(scale_factor) {}
 
-    int get_width() const;
-    void set_width(int width);
+    int get_width() const { return m_width; }
+    void set_width(int width) { m_width = width; }
 
-    int get_height() const;
-    void set_height(int height);
+    int get_height() const { return m_height; }
+    void set_height(int height) { m_height = height; }
 
-    int get_scale_factor() const;
-    void set_scale_factor(int height);
+    float get_scale_factor() const { return m_scale_factor; }
+    void set_scale_factor(float factor) { m_scale_factor = factor; }
 };
-
 
 class RenderTimerEvent : public wxEvent
 {
@@ -193,8 +195,8 @@ class GLCanvas3D
         };
 
         static const float THICKNESS_BAR_WIDTH;
-    private:
 
+    private:
         bool                        m_enabled{ false };
         unsigned int                m_z_texture_id{ 0 };
         // Not owned by LayersEditing.
@@ -237,6 +239,24 @@ class GLCanvas3D
         int last_object_id{ -1 };
         float last_z{ 0.0f };
         LayerHeightEditActionType last_action{ LAYER_HEIGHT_EDIT_ACTION_INCREASE };
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        struct Profile
+        {
+            GLModel baseline;
+            GLModel profile;
+            GLModel background;
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+            float old_canvas_width{ 0.0f };
+#else
+            Rect old_bar_rect;
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+            std::vector<double> old_layer_height_profile;
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
+            bool dirty{ false };
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+        };
+        Profile m_profile;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
         LayersEditing() = default;
         ~LayersEditing();
@@ -251,7 +271,7 @@ class GLCanvas3D
         bool is_enabled() const;
         void set_enabled(bool enabled);
 
-        void render_overlay(const GLCanvas3D& canvas) const;
+        void render_overlay(const GLCanvas3D& canvas);
         void render_volumes(const GLCanvas3D& canvas, const GLVolumeCollection& volumes);
 
 		void adjust_layer_height_profile();
@@ -263,7 +283,9 @@ class GLCanvas3D
         static float get_cursor_z_relative(const GLCanvas3D& canvas);
         static bool bar_rect_contains(const GLCanvas3D& canvas, float x, float y);
         static Rect get_bar_rect_screen(const GLCanvas3D& canvas);
+#if !ENABLE_GL_SHADERS_ATTRIBUTES
         static Rect get_bar_rect_viewport(const GLCanvas3D& canvas);
+#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
         static float get_overlay_window_width() { return LayersEditing::s_overlay_window_width; }
 
         float object_max_z() const { return m_object_max_z; }
@@ -273,12 +295,16 @@ class GLCanvas3D
     private:
         bool is_initialized() const;
         void generate_layer_height_texture();
-        void render_active_object_annotations(const GLCanvas3D& canvas, const Rect& bar_rect) const;
-        void render_profile(const Rect& bar_rect) const;
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+        void render_active_object_annotations(const GLCanvas3D& canvas);
+        void render_profile(const GLCanvas3D& canvas);
+#else
+        void render_active_object_annotations(const GLCanvas3D& canvas, const Rect& bar_rect);
+        void render_profile(const Rect& bar_rect);
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         void update_slicing_parameters();
 
-        static float thickness_bar_width(const GLCanvas3D &canvas);
-        
+        static float thickness_bar_width(const GLCanvas3D &canvas);        
     };
 
     struct Mouse
@@ -322,6 +348,16 @@ class GLCanvas3D
 
     struct SlaCap
     {
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+        struct Triangles
+        {
+            GLModel object;
+            GLModel supports;
+        };
+        typedef std::map<unsigned int, Triangles> ObjectIdToModelsMap;
+        double z;
+        ObjectIdToModelsMap triangles;
+#else
         struct Triangles
         {
             Pointf3s object;
@@ -330,6 +366,7 @@ class GLCanvas3D
         typedef std::map<unsigned int, Triangles> ObjectIdToTrianglesMap;
         double z;
         ObjectIdToTrianglesMap triangles;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
         SlaCap() { reset(); }
         void reset() { z = DBL_MAX; triangles.clear(); }
@@ -390,7 +427,7 @@ class GLCanvas3D
     public:
         bool is_empty() const { return m_text.empty(); }
         void set_text(const std::string& text);
-        void render(const Vec2d& mouse_position, GLCanvas3D& canvas) const;
+        void render(const Vec2d& mouse_position, GLCanvas3D& canvas);
         // Indicates that the mouse is inside an ImGUI dialog, therefore the tooltip should be suppressed.
         void set_in_imgui(bool b) { m_in_imgui = b; }
         bool is_in_imgui() const { return m_in_imgui; }
@@ -446,6 +483,7 @@ public:
 private:
     wxGLCanvas* m_canvas;
     wxGLContext* m_context;
+    Bed3D &m_bed;
 #if ENABLE_RETINA_GL
     std::unique_ptr<RetinaHelper> m_retina_helper;
 #endif
@@ -456,10 +494,10 @@ private:
     GLGizmosManager m_gizmos;
     GLToolbar m_main_toolbar;
     GLToolbar m_undoredo_toolbar;
-    ClippingPlane m_clipping_planes[2];
+    std::array<ClippingPlane, 2> m_clipping_planes;
     ClippingPlane m_camera_clipping_plane;
     bool m_use_clipping_planes;
-    SlaCap m_sla_caps[2];
+    std::array<SlaCap, 2> m_sla_caps;
     std::string m_sidebar_field;
     // when true renders an extra frame by not resetting m_dirty to false
     // see request_extra_frame()
@@ -475,6 +513,7 @@ private:
     const DynamicPrintConfig* m_config;
     Model* m_model;
     BackgroundSlicingProcess *m_process;
+    bool m_requires_check_outside_state{ false };
 
     std::array<unsigned int, 2> m_old_size{ 0, 0 };
 
@@ -495,8 +534,6 @@ private:
     // Following variable is obsolete and it should be safe to remove it.
     // I just don't want to do it now before a release (Lukas Matena 24.3.2019)
     bool m_render_sla_auxiliaries;
-
-    std::string m_color_by;
 
     bool m_reload_delayed;
 
@@ -596,8 +633,21 @@ private:
     }
     m_gizmo_highlighter;
 
+#if ENABLE_LEGACY_OPENGL_REMOVAL
+#if ENABLE_SHOW_CAMERA_TARGET
+    struct CameraTarget
+    {
+        std::array<GLModel, 3> axis;
+        Vec3d target{ Vec3d::Zero() };
+    };
+
+    CameraTarget m_camera_target;
+#endif // ENABLE_SHOW_CAMERA_TARGET
+    GLModel m_background;
+#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
 public:
-    explicit GLCanvas3D(wxGLCanvas* canvas);
+    explicit GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed);
     ~GLCanvas3D();
 
     bool is_initialized() const { return m_initialized; }
@@ -611,18 +661,20 @@ public:
     void post_event(wxEvent &&event);
 
     void set_as_dirty();
+    void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const;
     const GLVolumeCollection& get_volumes() const { return m_volumes; }
     void reset_volumes();
     ModelInstanceEPrintVolumeState check_volumes_outside_state() const;
 
+    void init_gcode_viewer() { m_gcode_viewer.init(); }
     void reset_gcode_toolpaths() { m_gcode_viewer.reset(); }
     const GCodeViewer::SequentialView& get_gcode_sequential_view() const { return m_gcode_viewer.get_sequential_view(); }
     void update_gcode_sequential_view_current(unsigned int first, unsigned int last) { m_gcode_viewer.update_sequential_view_current(first, last); }
 
     void toggle_sla_auxiliaries_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1);
-    void toggle_model_objects_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1);
+    void toggle_model_objects_visibility(bool visible, const ModelObject* mo = nullptr, int instance_idx = -1, const ModelVolume* mv = nullptr);
     void update_instance_printable_state_for_object(size_t obj_idx);
     void update_instance_printable_state_for_objects(const std::vector<size_t>& object_idxs);
 
@@ -648,7 +700,8 @@ public:
     void reset_clipping_planes_cache() { m_sla_caps[0].triangles.clear(); m_sla_caps[1].triangles.clear(); }
     void set_use_clipping_planes(bool use) { m_use_clipping_planes = use; }
 
-    void set_color_by(const std::string& value);
+    bool                                get_use_clipping_planes() const { return m_use_clipping_planes; }
+    const std::array<ClippingPlane, 2> &get_clipping_planes() const { return m_clipping_planes; };
 
     void refresh_camera_scene_box();
 
@@ -720,8 +773,12 @@ public:
 
     void reload_scene(bool refresh_immediately, bool force_full_scene_refresh = false);
 
-    void load_gcode_preview(const GCodeProcessor::Result& gcode_result, const std::vector<std::string>& str_tool_colors);
+    void load_gcode_preview(const GCodeProcessorResult& gcode_result, const std::vector<std::string>& str_tool_colors);
+#if ENABLE_PREVIEW_LAYOUT
+    void refresh_gcode_preview_render_paths(bool keep_sequential_current_first, bool keep_sequential_current_last);
+#else
     void refresh_gcode_preview_render_paths();
+#endif // ENABLE_PREVIEW_LAYOUT
     void set_gcode_view_preview_type(GCodeViewer::EViewType type) { return m_gcode_viewer.set_view_type(type); }
     GCodeViewer::EViewType get_gcode_view_preview_type() const { return m_gcode_viewer.get_view_type(); }
     void load_sla_preview();
@@ -749,7 +806,6 @@ public:
     void do_move(const std::string& snapshot_type);
     void do_rotate(const std::string& snapshot_type);
     void do_scale(const std::string& snapshot_type);
-    void do_flatten(const Vec3d& normal, const std::string& snapshot_type);
     void do_mirror(const std::string& snapshot_type);
 
     void update_gizmos_on_off_state();
@@ -800,6 +856,7 @@ public:
     
     void schedule_extra_frame(int miliseconds);
 
+    float get_main_toolbar_height() { return m_main_toolbar.get_height(); }
     int get_main_toolbar_item_id(const std::string& name) const { return m_main_toolbar.get_item_id(name); }
     void force_main_toolbar_left_action(int item_id) { m_main_toolbar.force_left_action(item_id, *this); }
     void force_main_toolbar_right_action(int item_id) { m_main_toolbar.force_right_action(item_id, *this); }
@@ -812,6 +869,11 @@ public:
 
     bool are_labels_shown() const { return m_labels.is_shown(); }
     void show_labels(bool show) { m_labels.show(show); }
+
+#if ENABLE_PREVIEW_LAYOUT
+    bool is_legend_shown() const { return m_gcode_viewer.is_legend_enabled(); }
+    void show_legend(bool show) { m_gcode_viewer.enable_legend(show); m_dirty = true; }
+#endif // ENABLE_PREVIEW_LAYOUT
 
     bool is_using_slope() const { return m_slope.is_used(); }
     void use_slope(bool use) { m_slope.use(use); }
@@ -890,15 +952,23 @@ private:
 
     void _picking_pass();
     void _rectangular_selection_picking_pass();
-    void _render_background() const;
+    void _render_background();
+#if ENABLE_GL_SHADERS_ATTRIBUTES
+    void _render_bed(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_axes);
+    void _render_bed_for_picking(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom);
+#else
     void _render_bed(bool bottom, bool show_axes);
     void _render_bed_for_picking(bool bottom);
+#endif // ENABLE_GL_SHADERS_ATTRIBUTES
     void _render_objects(GLVolumeCollection::ERenderType type);
     void _render_gcode();
-    void _render_selection() const;
+#if ENABLE_SHOW_TOOLPATHS_COG
+    void _render_gcode_cog();
+#endif // ENABLE_SHOW_TOOLPATHS_COG
+    void _render_selection();
     void _render_sequential_clearance();
 #if ENABLE_RENDER_SELECTION_CENTER
-    void _render_selection_center() const;
+    void _render_selection_center();
 #endif // ENABLE_RENDER_SELECTION_CENTER
     void _check_and_update_toolbar_icon_scale();
     void _render_overlays();
@@ -910,10 +980,10 @@ private:
     void _render_collapse_toolbar() const;
     void _render_view_toolbar() const;
 #if ENABLE_SHOW_CAMERA_TARGET
-    void _render_camera_target() const;
+    void _render_camera_target();
 #endif // ENABLE_SHOW_CAMERA_TARGET
     void _render_sla_slices();
-    void _render_selection_sidebar_hints() const;
+    void _render_selection_sidebar_hints();
     bool _render_undo_redo_stack(const bool is_undo, float pos_x);
     bool _render_search_list(float pos_x);
     bool _render_arrange_menu(float pos_x);
@@ -940,19 +1010,18 @@ private:
     void _stop_timer();
 
     // Create 3D thick extrusion lines for a skirt and brim.
-    // Adds a new Slic3r::GUI::3DScene::Volume to volumes.
-    void _load_print_toolpaths();
+    // Adds a new Slic3r::GUI::3DScene::Volume to volumes, updates collision with the build_volume.
+    void _load_print_toolpaths(const BuildVolume &build_volume);
     // Create 3D thick extrusion lines for object forming extrusions.
     // Adds a new Slic3r::GUI::3DScene::Volume to $self->volumes,
-    // one for perimeters, one for infill and one for supports.
-    void _load_print_object_toolpaths(const PrintObject& print_object, const std::vector<std::string>& str_tool_colors,
-                                      const std::vector<CustomGCode::Item>& color_print_values);
-    // Create 3D thick extrusion lines for wipe tower extrusions
-    void _load_wipe_tower_toolpaths(const std::vector<std::string>& str_tool_colors);
+    // one for perimeters, one for infill and one for supports, updates collision with the build_volume.
+    void _load_print_object_toolpaths(const PrintObject& print_object, const BuildVolume &build_volume,
+        const std::vector<std::string>& str_tool_colors, const std::vector<CustomGCode::Item>& color_print_values);
+    // Create 3D thick extrusion lines for wipe tower extrusions, updates collision with the build_volume.
+    void _load_wipe_tower_toolpaths(const BuildVolume &build_volume, const std::vector<std::string>& str_tool_colors);
 
     // Load SLA objects and support structures for objects, for which the slaposSliceSupports step has been finished.
 	void _load_sla_shells();
-    void _update_toolpath_volumes_outside_state();
     void _update_sla_shells_outside_state();
     void _set_warning_notification_if_needed(EWarning warning);
 
@@ -971,8 +1040,6 @@ private:
     bool _deactivate_arrange_menu();
 
     float get_overlay_window_width() { return LayersEditing::get_overlay_window_width(); }
-
-    static std::vector<std::array<float, 4>> _parse_colors(const std::vector<std::string>& colors);
 };
 
 } // namespace GUI

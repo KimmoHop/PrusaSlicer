@@ -22,10 +22,7 @@ public:
 	};
 
 	explicit AppConfig(EAppMode mode) :
-		m_dirty(false),
-		m_orig_version(Semver::invalid()),
-		m_mode(mode),
-		m_legacy_datadir(false)
+		m_mode(mode)
 	{
 		this->reset();
 	}
@@ -38,6 +35,8 @@ public:
 	// Load the slic3r.ini from a user profile directory (or a datadir, if configured).
 	// return error string or empty strinf
 	std::string         load();
+	// Load from an explicit path.
+	std::string         load(const std::string &path);
 	// Store the slic3r.ini into a user profile directory (or a datadir, if configured).
 	void 			   	save();
 
@@ -101,7 +100,7 @@ public:
 	bool                has_section(const std::string &section) const
 		{ return m_storage.find(section) != m_storage.end(); }
 	const std::map<std::string, std::string>& get_section(const std::string &section) const
-		{ return m_storage.find(section)->second; }
+		{ auto it = m_storage.find(section); assert(it != m_storage.end()); return it->second; }
 	void set_section(const std::string &section, const std::map<std::string, std::string>& data)
 		{ m_storage[section] = data; }
 	void 				clear_section(const std::string &section)

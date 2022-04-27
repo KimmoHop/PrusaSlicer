@@ -2,14 +2,20 @@
 #include "ConfigExceptions.hpp"
 #include "Plater.hpp"
 #include "GUI_App.hpp"
+#include "MainFrame.hpp"
 #include "OG_CustomCtrl.hpp"
+#include "MsgDialog.hpp"
+#include "format.hpp"
 
 #include <utility>
+#include <wx/bookctrl.h>
 #include <wx/numformatter.h>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
+#include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Preset.hpp"
 #include "I18N.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -126,6 +132,12 @@ bool OptionsGroup::is_legend_line()
 	return false;
 }
 
+void OptionsGroup::set_max_win_width(int max_win_width)
+{
+    if (custom_ctrl)
+        custom_ctrl->set_max_win_width(max_win_width);
+}
+
 void OptionsGroup::show_field(const t_config_option_key& opt_key, bool show/* = true*/)
 {
     Field* field = get_field(opt_key);
@@ -185,9 +197,17 @@ void OptionsGroup::append_line(const Line& line)
         m_options_mode.push_back(option_set[0].opt.mode);
 }
 
+void OptionsGroup::append_separator()
+{
+    m_lines.emplace_back(Line());
+}
+
 void OptionsGroup::activate_line(Line& line)
 {
-	m_use_custom_ctrl_as_parent = false;
+    if (line.is_separator())
+        return;
+
+    m_use_custom_ctrl_as_parent = false;
 
 	if (line.full_width && (
 		line.widget != nullptr ||
@@ -230,7 +250,6 @@ void OptionsGroup::activate_line(Line& line)
 
 	// if we have a single option with no label, no sidetext just add it directly to sizer
     if (option_set.size() == 1 && label_width == 0 && option_set.front().opt.full_width &&
-        option_set.front().opt.label.empty() &&
 		option_set.front().opt.sidetext.size() == 0 && option_set.front().side_widget == nullptr &&
 		line.get_extra_widgets().size() == 0) {
 
@@ -309,7 +328,6 @@ void OptionsGroup::activate_line(Line& line)
         grid_sizer->Add(sizer, 0, wxEXPAND | (staticbox ? wxALL : wxBOTTOM | wxTOP | wxLEFT), staticbox ? 0 : 1);
     // If we have a single option with no sidetext just add it directly to the grid sizer
     if (option_set.size() == 1 && option_set.front().opt.sidetext.size() == 0 &&
-        option_set.front().opt.label.empty() &&
 		option_set.front().side_widget == nullptr && line.get_extra_widgets().size() == 0) {
 		const auto& option = option_set.front();
 		const auto& field = build_field(option);
@@ -324,11 +342,12 @@ void OptionsGroup::activate_line(Line& line)
         return;
 	}
 
+    bool is_multioption_line = option_set.size() > 1;
     for (auto opt : option_set) {
 		ConfigOptionDef option = opt.opt;
         wxSizer* sizer_tmp = sizer;
 		// add label if any
-		if (!option.label.empty() && !custom_ctrl) {
+		if ((is_multioption_line || line.label.IsEmpty()) && !option.label.empty() && !custom_ctrl) {
 //!			To correct translation by context have to use wxGETTEXT_IN_CONTEXT macro from wxWidget 3.1.1
 			wxString str_label = (option.label == L_CONTEXT("Top", "Layers") || option.label == L_CONTEXT("Bottom", "Layers")) ?
 				_CTX(option.label, "Layers") :
@@ -396,7 +415,7 @@ void OptionsGroup::activate_line(Line& line)
 }
 
 // create all controls for the option group from the m_lines
-bool OptionsGroup::activate(std::function<void()> throw_if_canceled)
+bool OptionsGroup::activate(std::function<void()> throw_if_canceled/* = [](){}*/, int horiz_alignment/* = wxALIGN_LEFT*/)
 {
 	if (sizer)//(!sizer->IsEmpty())
 		return false;
@@ -436,6 +455,10 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled)
 			throw_if_canceled();
 			activate_line(line);
 		}
+
+        ctrl_horiz_alignment = horiz_alignment;
+        if (custom_ctrl)
+            custom_ctrl->init_max_win_width();
 	} catch (UIBuildCanceled&) {
 		auto p = sizer;
 		this->clear();
@@ -486,15 +509,13 @@ void OptionsGroup::clear(bool destroy_custom_ctrl)
 	m_fields.clear();
 }
 
-Line OptionsGroup::create_single_option_line(const Option& option, const wxString& path/* = wxEmptyString*/) const {
-// 	Line retval{ _(option.opt.label), _(option.opt.tooltip) };
+Line OptionsGroup::create_single_option_line(const Option& option, const std::string& path/* = std::string()*/) const
+{
     wxString tooltip = _(option.opt.tooltip);
     edit_tooltip(tooltip);
 	Line retval{ _(option.opt.label), tooltip };
 	retval.label_path = path;
-    Option tmp(option);
-    tmp.opt.label = std::string("");
-    retval.append_option(tmp);
+    retval.append_option(option);
     return retval;
 }
 
@@ -575,11 +596,11 @@ void ConfigOptionsGroup::back_to_config_value(const DynamicPrintConfig& config, 
 		value = int(nozzle_diameter->values.size());
 	}
     else if (m_opt_map.find(opt_key) == m_opt_map.end() ||
-		    // This option don't have corresponded field
-		     opt_key == "bed_shape"				|| opt_key == "filament_ramming_parameters" ||
-		     opt_key == "compatible_printers"	|| opt_key == "compatible_prints" ) {
+		    // This option doesn't have corresponded field
+             is_option_without_field(opt_key) ) {
         value = get_config_value(config, opt_key);
         this->change_opt_value(opt_key, value);
+        OptionsGroup::on_change_OG(opt_key, value);
         return;
     }
 	else
@@ -852,10 +873,10 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig& config
 		}
 		break;
 	case coString:
-		ret = static_cast<wxString>(config.opt_string(opt_key));
+		ret = from_u8(config.opt_string(opt_key));
 		break;
 	case coStrings:
-		if (opt_key == "compatible_printers" || opt_key == "compatible_prints") {
+		if (opt_key == "compatible_printers" || opt_key == "compatible_prints" || opt_key == "gcode_substitutions") {
 			ret = config.option<ConfigOptionStrings>(opt_key)->values;
 			break;
 		}
@@ -873,7 +894,7 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig& config
 			ret = text_value;
 		}
 		else
-			ret = static_cast<wxString>(config.opt_string(opt_key, static_cast<unsigned int>(idx)));
+			ret = from_u8(config.opt_string(opt_key, static_cast<unsigned int>(idx)));
 		break;
 	case coBool:
 		ret = config.opt_bool(opt_key);
@@ -944,6 +965,33 @@ void ConfigOptionsGroup::change_opt_value(const t_config_option_key& opt_key, co
 		m_modelconfig->touch();
 }
 
+wxString OptionsGroup::get_url(const std::string& path_end)
+{
+    if (path_end.empty())
+        return wxEmptyString;
+
+    wxString language = get_app_config()->get("translation_language");
+    wxString lang_marker = language.IsEmpty() ? "en" : language.BeforeFirst('_');
+
+    return wxString("https://help.prusa3d.com/") + lang_marker + wxString("/article/" + path_end);
+}
+
+bool OptionsGroup::launch_browser(const std::string& path_end)
+{
+    return wxGetApp().open_browser_with_warning_dialog(OptionsGroup::get_url(path_end), wxGetApp().mainframe->m_tabpanel);
+}
+
+bool OptionsGroup::is_option_without_field(const std::string& opt_key)
+{
+    return  opt_key!= "thumbnails" // "thumbnails" has related field
+            && PresetCollection::is_independent_from_extruder_number_option(opt_key);
+}
+
+
+//-------------------------------------------------------------------------------------------
+// ogStaticText
+//-------------------------------------------------------------------------------------------
+
 ogStaticText::ogStaticText(wxWindow* parent, const wxString& text) :
     wxStaticText(parent, wxID_ANY, text, wxDefaultPosition, wxDefaultSize)
 {
@@ -959,6 +1007,39 @@ void ogStaticText::SetText(const wxString& value, bool wrap/* = true*/)
 	SetLabel(value);
     if (wrap) Wrap(60 * wxGetApp().em_unit());
 	GetParent()->Layout();
+}
+
+void ogStaticText::SetPathEnd(const std::string& link)
+{
+    Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& event) {
+        if (HasCapture())
+            return;
+        this->CaptureMouse();
+        event.Skip();
+    } );
+    Bind(wxEVT_LEFT_UP, [link, this](wxMouseEvent& event) {
+        if (!HasCapture())
+            return;
+        ReleaseMouse();
+        OptionsGroup::launch_browser(link);
+        event.Skip();
+    } );
+    Bind(wxEVT_ENTER_WINDOW, [this, link](wxMouseEvent& event) {
+        SetToolTip(OptionsGroup::get_url(get_app_config()->get("suppress_hyperlinks") != "1" ? link : std::string()));
+        FocusText(true); 
+        event.Skip(); 
+    });
+    Bind(wxEVT_LEAVE_WINDOW, [this](wxMouseEvent& event) { FocusText(false); event.Skip(); });
+}
+
+void ogStaticText::FocusText(bool focus)
+{
+    if (get_app_config()->get("suppress_hyperlinks") == "1")
+        return;
+
+    SetFont(focus ? Slic3r::GUI::wxGetApp().link_font() :
+                    Slic3r::GUI::wxGetApp().normal_font());
+    Refresh();
 }
 
 } // GUI
