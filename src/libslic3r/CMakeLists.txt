@@ -17,6 +17,7 @@ endif()
 set(SLIC3R_SOURCES
     pchheader.cpp
     pchheader.hpp
+    AStar.hpp
     BoundingBox.cpp
     BoundingBox.hpp
     BridgeDetector.cpp
@@ -40,8 +41,6 @@ set(SLIC3R_SOURCES
     enum_bitmask.hpp
     ExPolygon.cpp
     ExPolygon.hpp
-    ExPolygonCollection.cpp
-    ExPolygonCollection.hpp
     Extruder.cpp
     Extruder.hpp
     ExtrusionEntity.cpp
@@ -214,6 +213,7 @@ set(SLIC3R_SOURCES
     PrintObject.cpp
     PrintObjectSlice.cpp
     PrintRegion.cpp
+    PointGrid.hpp
     PNGReadWrite.hpp
     PNGReadWrite.cpp
     QuadricEdgeCollapse.cpp
@@ -372,7 +372,7 @@ target_link_libraries(libslic3r
     boost_libs
     clipper
     nowide
-    EXPAT::EXPAT
+    libexpat
     glu-libtess
     qhull
     semver

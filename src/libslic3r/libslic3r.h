@@ -4,7 +4,6 @@
 #include "libslic3r_version.h"
 #define GCODEVIEWER_APP_NAME "PrusaSlicer G-code Viewer"
 #define GCODEVIEWER_APP_KEY  "PrusaSlicerGcodeViewer"
-#define GCODEVIEWER_BUILD_ID std::string("PrusaSlicer G-code Viewer-") + std::string(SLIC3R_VERSION) + std::string("-UNKNOWN")
 
 // this needs to be included early for MSVC (listing it in Build.PL is not enough)
 #include <memory>
@@ -330,6 +329,12 @@ public:
     inline size_t size() const { return end() - begin(); }
     inline bool   empty() const { return size() == 0; }
 };
+
+template<class T, class = FloatingOnly<T>>
+constexpr T NaN = std::numeric_limits<T>::quiet_NaN();
+
+constexpr float NaNf = NaN<float>;
+constexpr double NaNd = NaN<double>;
 
 } // namespace Slic3r
 

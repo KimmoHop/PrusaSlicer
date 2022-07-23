@@ -44,6 +44,8 @@ SLAImportJob::~SLAImportJob() = default;
 
 void SLAImportJob::process(Ctl &ctl)
 {
+    if (p->path.empty() || ! p->err.empty()) return;
+
     auto statustxt = _u8L("Importing SLA archive");
     ctl.update_status(0, statustxt);
 
@@ -52,8 +54,6 @@ void SLAImportJob::process(Ctl &ctl)
             ctl.update_status(int(s), statustxt);
         return !ctl.was_canceled();
     };
-
-    if (p->path.empty()) return;
 
     std::string path = p->path.ToUTF8().data();
     std::string format_id = p->import_dlg->get_archive_format();
@@ -94,6 +94,7 @@ void SLAImportJob::reset()
     p->profile = p->plater->sla_print().full_print_config();
     p->quality = SLAImportQuality::Balanced;
     p->path.Clear();
+    p->err     = "";
 }
 
 void SLAImportJob::prepare()
@@ -103,6 +104,10 @@ void SLAImportJob::prepare()
     auto path  = p->import_dlg->get_path();
     auto nm    = wxFileName(path);
     p->path    = !nm.Exists(wxFILE_EXISTS_REGULAR) ? "" : nm.GetFullPath();
+    if (p->path.empty()) {
+        p->err = _u8L("The file does not exist.");
+        return;
+    }
     p->sel     = p->import_dlg->get_selection();
     p->quality = p->import_dlg->get_quality();
 

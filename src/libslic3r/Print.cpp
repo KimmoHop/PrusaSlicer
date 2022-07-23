@@ -13,6 +13,7 @@
 #include "GCode.hpp"
 #include "GCode/WipeTower.hpp"
 #include "Utils.hpp"
+#include "BuildVolume.hpp"
 
 #include <float.h>
 
@@ -387,7 +388,7 @@ bool Print::sequential_print_horizontal_clearance_valid(const Print& print, Poly
                     Geometry::assemble_transform({ 0.0, 0.0, model_instance0->get_offset().z() }, model_instance0->get_rotation(), model_instance0->get_scaling_factor(), model_instance0->get_mirror())),
                     // Shrink the extruder_clearance_radius a tiny bit, so that if the object arrangement algorithm placed the objects
                     // exactly by satisfying the extruder_clearance_radius, this test will not trigger collision.
-                    float(scale_(0.5 * print.config().extruder_clearance_radius.value - EPSILON)),
+                    float(scale_(0.5 * print.config().extruder_clearance_radius.value - BuildVolume::BedEpsilon)),
                     jtRound, scale_(0.1)).front());
         }
 	    // Make a copy, so it may be rotated for instances.
@@ -538,8 +539,21 @@ std::string Print::validate(std::string* warning) const
                 for (size_t idx_object = 0; idx_object < m_objects.size(); ++ idx_object) {
                     if (idx_object == tallest_object_idx)
                         continue;
-                    if (layer_height_profiles[idx_object] != layer_height_profiles[tallest_object_idx])
-                        return L("The Wipe tower is only supported if all objects have the same variable layer height");
+                    // Check that the layer height profiles are equal. This will happen when one object is
+                    // a copy of another, or when a layer height modifier is used the same way on both objects.
+                    // The latter case might create a floating point inaccuracy mismatch, so compare
+                    // element-wise using an epsilon check.
+                    size_t i = 0;
+                    const coordf_t eps = 0.5 * EPSILON; // layers closer than EPSILON will be merged later. Let's make
+                    // this check a bit more sensitive to make sure we never consider two different layers as one.
+                    while (i < layer_height_profiles[idx_object].size()
+                        && i < layer_height_profiles[tallest_object_idx].size()) {
+                        if (i%2 == 0 && layer_height_profiles[tallest_object_idx][i] > layer_height_profiles[idx_object][layer_height_profiles[idx_object].size() - 2 ])
+                            break;
+                        if (std::abs(layer_height_profiles[idx_object][i] - layer_height_profiles[tallest_object_idx][i]) > eps)
+                            return L("The Wipe tower is only supported if all objects have the same variable layer height");
+                        ++i;
+                    }
                 }
             }
         }
