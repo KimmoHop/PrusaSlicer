@@ -1,8 +1,13 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Tomáš Mészáros @tamasmeszaros, Filip Sykala @Jony01, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLGizmoSlaSupports_hpp_
 #define slic3r_GLGizmoSlaSupports_hpp_
 
-#include "GLGizmoBase.hpp"
+#include "GLGizmoSlaBase.hpp"
 #include "slic3r/GUI/GLSelectionRectangle.hpp"
+#include "slic3r/GUI/I18N.hpp"
 
 #include "libslic3r/SLA/SupportPoint.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -19,13 +24,10 @@ namespace GUI {
 class Selection;
 enum class SLAGizmoEventType : unsigned char;
 
-class GLGizmoSlaSupports : public GLGizmoBase
+class GLGizmoSlaSupports : public GLGizmoSlaBase
 {
 private:
-
-    bool unproject_on_mesh(const Vec2d& mouse_pos, std::pair<Vec3f, Vec3f>& pos_and_normal);
-
-    const float RenderPointScale = 1.f;
+    static constexpr float RenderPointScale = 1.f;
 
     class CacheEntry {
     public:
@@ -57,15 +59,14 @@ private:
 public:
     GLGizmoSlaSupports(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
     virtual ~GLGizmoSlaSupports() = default;
-    void data_changed() override;
+    void data_changed(bool is_serializing) override;
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down);
     void delete_selected_points(bool force = false);
     //ClippingPlane get_sla_clipping_plane() const;
 
-    bool is_in_editing_mode() const { return m_editing_mode; }
-    bool is_selection_rectangle_dragging() const { return m_selection_rectangle.is_dragging(); }
+    bool is_in_editing_mode() const override { return m_editing_mode; }
+    bool is_selection_rectangle_dragging() const  override { return m_selection_rectangle.is_dragging(); }
     bool has_backend_supports() const;
-    void reslice_SLA_supports(bool postpone_error_messages = false) const;
 
     bool wants_enter_leave_snapshots() const override { return true; }
     std::string get_gizmo_entering_text() const override { return _u8L("Entering SLA support points"); }
@@ -77,13 +78,18 @@ public:
     /// <param name="mouse_event">Keep information about mouse click</param>
     /// <returns>Return True when use the information otherwise False.</returns>
     bool on_mouse(const wxMouseEvent &mouse_event) override;
+
 private:
     bool on_init() override;
     void on_render() override;
-    void on_render_for_picking() override;
+    virtual void on_register_raycasters_for_picking() override;
+    virtual void on_unregister_raycasters_for_picking() override;
 
-    void render_points(const Selection& selection, bool picking = false);
+    void render_points(const Selection& selection);
     bool unsaved_changes() const;
+    void register_point_raycasters_for_picking();
+    void unregister_point_raycasters_for_picking();
+    void update_point_raycasters_for_picking_transform();
 
     bool m_lock_unique_islands = false;
     bool m_editing_mode = false;            // Is editing mode active?
@@ -96,19 +102,18 @@ private:
     std::vector<sla::SupportPoint> m_normal_cache; // to restore after discarding changes or undo/redo
     ObjectID m_old_mo_id;
 
-    GLModel m_cone;
-    GLModel m_cylinder;
-    GLModel m_sphere;
+    PickingModel m_sphere;
+    PickingModel m_cone;
+    std::vector<std::pair<std::shared_ptr<SceneRaycasterItem>, std::shared_ptr<SceneRaycasterItem>>> m_point_raycasters;
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
-    std::map<std::string, wxString> m_desc;
+    std::map<std::string, std::string> m_desc;
 
     GLSelectionRectangle m_selection_rectangle;
 
     bool m_wait_for_up_event = false;
     bool m_selection_empty = true;
-    EState m_old_state = Off; // to be able to see that the gizmo has just been closed (see on_set_state)
 
     std::vector<const ConfigOption*> get_config_options(const std::vector<std::string>& keys) const;
     bool is_mesh_point_clipped(const Vec3d& point) const;
@@ -129,12 +134,13 @@ private:
     void auto_generate();
     void switch_to_editing_mode();
     void disable_editing_mode();
-    void ask_about_changes_call_after(std::function<void()> on_yes, std::function<void()> on_no);
+
+    // return false if Cancel was selected
+    bool ask_about_changes(std::function<void()> on_yes, std::function<void()> on_no);
 
 protected:
     void on_set_state() override;
-    void on_set_hover_id() override
-    {
+    void on_set_hover_id() override {
         if (! m_editing_mode || (int)m_editing_cache.size() <= m_hover_id)
             m_hover_id = -1;
     }
@@ -146,7 +152,6 @@ protected:
     std::string on_get_name() const override;
     bool on_is_activable() const override;
     bool on_is_selectable() const override;
-    virtual CommonGizmosDataID on_get_requirements() const override;
     void on_load(cereal::BinaryInputArchive& ar) override;
     void on_save(cereal::BinaryOutputArchive& ar) const override;
 };

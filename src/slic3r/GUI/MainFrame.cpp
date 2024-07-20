@@ -1,3 +1,14 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, David Kocík @kocikdav, Vojtěch Bubník @bubnikv, Tomáš Mészáros @tamasmeszaros, Enrico Turri @enricoturri1966, Filip Sykala @Jony01, Lukáš Hejl @hejllukas, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2021 Jason Scurtu @xarbit
+///|/ Copyright (c) 2019 John Drake @foxox
+///|/
+///|/ ported from lib/Slic3r/GUI/MainFrame.pm:
+///|/ Copyright (c) Prusa Research 2016 - 2019 Vojtěch Bubník @bubnikv, Vojtěch Král @vojtechkral, Oleksandra Iushchenko @YuSanka, Tomáš Mészáros @tamasmeszaros, Enrico Turri @enricoturri1966
+///|/ Copyright (c) Slic3r 2014 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2014 Mark Hindess
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "MainFrame.hpp"
 
 #include <wx/panel.h>
@@ -9,9 +20,13 @@
 #include <wx/menu.h>
 #include <wx/progdlg.h>
 #include <wx/tooltip.h>
+#include <wx/accel.h>
 //#include <wx/glcanvas.h>
 #include <wx/filename.h>
 #include <wx/debug.h>
+#if wxUSE_SECRETSTORE 
+#include <wx/secretstore.h>
+#endif
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -23,7 +38,6 @@
 #include "libslic3r/PresetBundle.hpp"
 
 #include "Tab.hpp"
-#include "ProgressStatusBar.hpp"
 #include "3DScene.hpp"
 #include "PrintHostDialogs.hpp"
 #include "wxExtensions.hpp"
@@ -43,12 +57,14 @@
 #include "GUI_App.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MsgDialog.hpp"
-#include "Notebook.hpp"
+#include "TopBar.hpp"
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GalleryDialog.hpp"
 #include "NotificationManager.hpp"
 #include "Preferences.hpp"
+#include "WebViewDialog.hpp"
+#include "UserAccount.hpp"
 
 #ifdef _WIN32
 #include <dbt.h>
@@ -122,8 +138,8 @@ static wxIcon main_frame_icon(GUI_App::EAppMode app_mode)
 #endif // _WIN32
 }
 
-MainFrame::MainFrame() :
-DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE, "mainframe"),
+MainFrame::MainFrame(const int font_point_size) :
+DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE, "mainframe", font_point_size),
     m_printhost_queue_dlg(new PrintHostQueueDialog(this))
     , m_recent_projects(9)
     , m_settings_dialog(this)
@@ -156,14 +172,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
     // Load the icon either from the exe, or from the ico file.
     SetIcon(main_frame_icon(wxGetApp().get_app_mode()));
 
-	// initialize status bar
-//    m_statusbar = std::make_shared<ProgressStatusBar>(this);
-//    m_statusbar->set_font(GUI::wxGetApp().normal_font());
-//    if (wxGetApp().is_editor())
-//        m_statusbar->embed(this);
-//    m_statusbar->set_status_text(_L("Version") + " " +
-//        SLIC3R_VERSION + " - " +
-//       _L("Remember to check for updates at https://github.com/prusa3d/PrusaSlicer/releases"));
+    wxGetApp().set_searcher(&m_searcher);
 
     // initialize tabpanel and menubar
     init_tabpanel();
@@ -172,18 +181,33 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
     else
         init_menubar_as_editor();
 
+#ifndef __APPLE__
+    std::vector<wxAcceleratorEntry*>& entries_cache = accelerator_entries_cache();
+    assert(entries_cache.size() + 6 < 100);
+    wxAcceleratorEntry entries[100];
+
+    int id = 0;
+    for (const auto* entry : entries_cache)
+        entries[id++].Set(entry->GetFlags(), entry->GetKeyCode(), entry->GetMenuItem()->GetId());
+
 #if _WIN32
     // This is needed on Windows to fake the CTRL+# of the window menu when using the numpad
-    wxAcceleratorEntry entries[6];
-    entries[0].Set(wxACCEL_CTRL, WXK_NUMPAD1, wxID_HIGHEST + 1);
-    entries[1].Set(wxACCEL_CTRL, WXK_NUMPAD2, wxID_HIGHEST + 2);
-    entries[2].Set(wxACCEL_CTRL, WXK_NUMPAD3, wxID_HIGHEST + 3);
-    entries[3].Set(wxACCEL_CTRL, WXK_NUMPAD4, wxID_HIGHEST + 4);
-    entries[4].Set(wxACCEL_CTRL, WXK_NUMPAD5, wxID_HIGHEST + 5);
-    entries[5].Set(wxACCEL_CTRL, WXK_NUMPAD6, wxID_HIGHEST + 6);
-    wxAcceleratorTable accel(6, entries);
-    SetAcceleratorTable(accel);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD1, wxID_HIGHEST + 1);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD2, wxID_HIGHEST + 2);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD3, wxID_HIGHEST + 3);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD4, wxID_HIGHEST + 4);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD5, wxID_HIGHEST + 5);
+    entries[id++].Set(wxACCEL_CTRL, WXK_NUMPAD6, wxID_HIGHEST + 6);
 #endif // _WIN32
+
+    wxAcceleratorTable accel(id, entries);
+    SetAcceleratorTable(accel);
+
+    // clear cache with wxAcceleratorEntry, because it's no need anymore
+    for (auto entry : entries_cache)
+        delete entry;
+    entries_cache.clear();
+#endif
 
     // set default tooltip timer in msec
     // SetAutoPop supposedly accepts long integers but some bug doesn't allow for larger values
@@ -202,7 +226,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
     sizer->SetSizeHints(this);
     Fit();
 
-    const wxSize min_size = wxGetApp().get_min_size(); //wxSize(76*wxGetApp().em_unit(), 49*wxGetApp().em_unit());
+    const wxSize min_size = wxGetApp().get_min_size(this);
 #ifdef __APPLE__
     // Using SetMinSize() on Mac messes up the window position in some cases
     // cf. https://groups.google.com/forum/#!topic/wx-users/yUKPBBfXWO0
@@ -249,22 +273,37 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
     //FIXME it seems this method is not called on application start-up, at least not on Windows. Why?
     // The same applies to wxEVT_CREATE, it is not being called on startup on Windows.
     Bind(wxEVT_ACTIVATE, [this](wxActivateEvent& event) {
-        if (m_plater != nullptr && event.GetActive())
-            m_plater->on_activate();
+        if (m_plater != nullptr)
+            m_plater->on_activate(event.GetActive());
         event.Skip();
     });
 
+    Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+        event.Skip();
+#ifdef _WIN32
+        // Update window property to mainframe so other instances can indentify it.
+        wxGetApp().other_instance_message_handler()->update_windows_properties(this);
+#endif //WIN32
+        if (m_layout == ESettingsLayout::Dlg || m_layout == ESettingsLayout::Old) {
+            if (m_layout == ESettingsLayout::Old)
+                m_tabpanel->UpdateSearchSizeAndPosition();
+            else
+                m_tmp_top_bar->UpdateSearchSizeAndPosition();
+        }
+    });
+
+    Bind(wxEVT_MOVE, [](wxMoveEvent& event) {
 // OSX specific issue:
 // When we move application between Retina and non-Retina displays, The legend on a canvas doesn't redraw
 // So, redraw explicitly canvas, when application is moved
 //FIXME maybe this is useful for __WXGTK3__ as well?
 #if __APPLE__
-    Bind(wxEVT_MOVE, [](wxMoveEvent& event) {
         wxGetApp().plater()->get_current_canvas3D()->set_as_dirty();
         wxGetApp().plater()->get_current_canvas3D()->request_extra_frame();
+#endif
+        wxGetApp().searcher().update_dialog_position();
         event.Skip();
     });
-#endif
 
     wxGetApp().persist_window_geometry(this, true);
     wxGetApp().persist_window_geometry(&m_settings_dialog, true);
@@ -272,95 +311,23 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
     update_ui_from_settings();    // FIXME (?)
 
     if (m_plater != nullptr) {
-        m_plater->get_collapse_toolbar().set_enabled(wxGetApp().app_config->get("show_collapse_button") == "1");
+#if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
+        // When the application is run as GCodeViewer the collapse toolbar is set as enabled, but rendered outside of the screen
+        m_plater->get_collapse_toolbar().set_enabled(wxGetApp().is_gcode_viewer() ?
+            true : wxGetApp().app_config->get_bool("show_collapse_button"));
+#else
+        m_plater->get_collapse_toolbar().set_enabled(wxGetApp().app_config->get_bool("show_collapse_button"));
+#endif // ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
         m_plater->show_action_buttons(true);
 
         preferences_dialog = new PreferencesDialog(this);
     }
-}
 
-#ifdef _MSW_DARK_MODE
-static wxString pref() { return " [ "; }
-static wxString suff() { return " ] "; }
-static void append_tab_menu_items_to_menubar(wxMenuBar* bar, PrinterTechnology pt, bool is_mainframe_menu)
-{
-    if (is_mainframe_menu)
-        bar->Append(new wxMenu(), pref() + _L("Plater") + suff());
-    for (const wxString& title : { is_mainframe_menu    ? _L("Print Settings")       : pref() + _L("Print Settings") + suff(),
-                                   pt == ptSLA          ? _L("Material Settings")    : _L("Filament Settings"),
-                                   _L("Printer Settings") })
-        bar->Append(new wxMenu(), title);
-}
-
-// update markers for selected/unselected menu items
-static void update_marker_for_tabs_menu(wxMenuBar* bar, const wxString& title, bool is_mainframe_menu)
-{
-    if (!bar)
-        return;
-    size_t items_cnt = bar->GetMenuCount();
-    for (size_t id = items_cnt - (is_mainframe_menu ? 4 : 3); id < items_cnt; id++) {
-        wxString label = bar->GetMenuLabel(id);
-        if (label.First(pref()) == 0) {
-            if (label == pref() + title + suff())
-                return;
-            label.Remove(size_t(0), pref().Len());
-            label.RemoveLast(suff().Len());
-            bar->SetMenuLabel(id, label);
-            break;
-        }
+    if (wxGetApp().is_editor()) {
+        // jump to found option from SearchDialog
+        Bind(wxCUSTOMEVT_JUMP_TO_OPTION, [](wxCommandEvent& evt) { wxGetApp().jump_to_option(evt.GetInt()); });
     }
-    if (int id = bar->FindMenu(title); id != wxNOT_FOUND)
-        bar->SetMenuLabel(id, pref() + title + suff());
 }
-
-static void add_tabs_as_menu(wxMenuBar* bar, MainFrame* main_frame, wxWindow* bar_parent)
-{
-    PrinterTechnology pt = main_frame->plater() ? main_frame->plater()->printer_technology() : ptFFF;
-
-    bool is_mainframe_menu = bar_parent == main_frame;
-    if (!is_mainframe_menu)
-        append_tab_menu_items_to_menubar(bar, pt, is_mainframe_menu);
-
-    bar_parent->Bind(wxEVT_MENU_OPEN, [main_frame, bar, is_mainframe_menu](wxMenuEvent& event) {
-        wxMenu* const menu = event.GetMenu();
-        if (!menu || menu->GetMenuItemCount() > 0) {
-            // If we are here it means that we open regular menu and not a tab used as a menu
-            event.Skip(); // event.Skip() is verry important to next processing of the wxEVT_UPDATE_UI by this menu items.
-                          // If wxEVT_MENU_OPEN will not be pocessed in next event queue then MenuItems of this menu will never caught wxEVT_UPDATE_UI 
-                          // and, as a result, "check/radio value" will not be updated
-            return;
-        }
-
-        // update tab selection
-
-        const wxString& title = menu->GetTitle();
-        if (title == _L("Plater"))
-            main_frame->select_tab(size_t(0));
-        else if (title == _L("Print Settings"))
-            main_frame->select_tab(wxGetApp().get_tab(main_frame->plater()->printer_technology() == ptFFF ? Preset::TYPE_PRINT : Preset::TYPE_SLA_PRINT));
-        else if (title == _L("Filament Settings"))
-            main_frame->select_tab(wxGetApp().get_tab(Preset::TYPE_FILAMENT));
-        else if (title == _L("Material Settings"))
-            main_frame->select_tab(wxGetApp().get_tab(Preset::TYPE_SLA_MATERIAL));
-        else if (title == _L("Printer Settings"))
-            main_frame->select_tab(wxGetApp().get_tab(Preset::TYPE_PRINTER));
-
-        // update markers for selected/unselected menu items
-        update_marker_for_tabs_menu(bar, title, is_mainframe_menu);
-    });
-}
-
-void MainFrame::show_tabs_menu(bool show)
-{
-    if (show)
-        append_tab_menu_items_to_menubar(m_menubar, plater() ? plater()->printer_technology() : ptFFF, true);
-    else
-        while (m_menubar->GetMenuCount() >= 8) {
-            if (wxMenu* menu = m_menubar->Remove(7))
-                delete menu;
-        }
-}
-#endif // _MSW_DARK_MODE
 
 void MainFrame::update_layout()
 {
@@ -395,15 +362,15 @@ void MainFrame::update_layout()
             m_settings_dialog.Close();
 
         m_tabpanel->Hide();
+        m_tmp_top_bar->Hide();
         m_plater->Hide();
 
         Layout();
     };
 
     ESettingsLayout layout = wxGetApp().is_gcode_viewer() ? ESettingsLayout::GCodeViewer :
-        (wxGetApp().app_config->get("old_settings_layout_mode") == "1" ? ESettingsLayout::Old :
-            wxGetApp().app_config->get("new_settings_layout_mode") == "1" ? ( wxGetApp().tabs_as_menu() ? ESettingsLayout::Old : ESettingsLayout::New) :
-            wxGetApp().app_config->get("dlg_settings_layout_mode") == "1" ? ESettingsLayout::Dlg : ESettingsLayout::Old);
+        (wxGetApp().app_config->get_bool("old_settings_layout_mode") ? ESettingsLayout::Old :
+         wxGetApp().app_config->get_bool("dlg_settings_layout_mode") ? ESettingsLayout::Dlg : ESettingsLayout::Old);
 
     if (m_layout == layout)
         return;
@@ -427,7 +394,6 @@ void MainFrame::update_layout()
                                  layout   == ESettingsLayout::Dlg       ? State::toDlg      : State::noUpdate;
 #endif //__WXMSW__
 
-    ESettingsLayout old_layout = m_layout;
     m_layout = layout;
 
     // From the very beginning the Print settings should be selected
@@ -443,70 +409,46 @@ void MainFrame::update_layout()
     case ESettingsLayout::Old:
     {
         m_plater->Reparent(m_tabpanel);
-#ifdef _MSW_DARK_MODE
         m_plater->Layout();
-        if (!wxGetApp().tabs_as_menu())
-            dynamic_cast<Notebook*>(m_tabpanel)->InsertPage(0, m_plater, _L("Plater"), std::string("plater"), true);
-        else
-#endif
-        m_tabpanel->InsertPage(0, m_plater, _L("Plater"));
+
         m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 1);
         m_plater->Show();
-        m_tabpanel->Show();
-        // update Tabs
-        if (old_layout == ESettingsLayout::Dlg)
-            if (int sel = m_tabpanel->GetSelection(); sel != wxNOT_FOUND)
-                m_tabpanel->SetSelection(sel+1);// call SetSelection to correct layout after switching from Dlg to Old mode
-#ifdef _MSW_DARK_MODE
-        if (wxGetApp().tabs_as_menu())
-            show_tabs_menu(true);
-#endif
-        break;
-    }
-    case ESettingsLayout::New:
-    {
-        m_main_sizer->Add(m_plater, 1, wxEXPAND);
-        m_tabpanel->Hide();
-        m_main_sizer->Add(m_tabpanel, 1, wxEXPAND);
-        m_plater_page = new wxPanel(m_tabpanel);
-#ifdef _MSW_DARK_MODE
-        if (!wxGetApp().tabs_as_menu())
-            dynamic_cast<Notebook*>(m_tabpanel)->InsertPage(0, m_plater_page, _L("Plater"), std::string("plater"), true);
-        else
-#endif
-        m_tabpanel->InsertPage(0, m_plater_page, _L("Plater")); // empty panel just for Plater tab */
-        m_plater->Show();
+        m_tabpanel->ShowFull();
+        m_tmp_top_bar->Hide();
         break;
     }
     case ESettingsLayout::Dlg:
     {
-        m_main_sizer->Add(m_plater, 1, wxEXPAND);
-        m_tabpanel->Reparent(&m_settings_dialog);
-        m_settings_dialog.GetSizer()->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 2);
-        m_tabpanel->Show();
+        const int sel = m_tabpanel->GetSelection();
+
+        m_plater->Reparent(this);
+        m_main_sizer->Add(m_tmp_top_bar, 0, wxEXPAND | wxTOP, 1);
+        m_main_sizer->Add(m_plater, 1, wxEXPAND | wxTOP, 1);
+        m_plater->Layout();
+        m_tmp_top_bar->ShowFull();
         m_plater->Show();
 
-#ifdef _MSW_DARK_MODE
-        if (wxGetApp().tabs_as_menu())
-            show_tabs_menu(false);
-#endif
+        m_tabpanel->Reparent(&m_settings_dialog);
+        m_tabpanel->SetSelection(sel > 0 ? (sel - 1) : 0);
+        m_tabpanel->ShowJustMode();
+        m_settings_dialog.GetSizer()->Add(m_tabpanel, 1, wxEXPAND | wxTOP, 2);
+        m_settings_dialog.Layout();
         break;
     }
     case ESettingsLayout::GCodeViewer:
     {
         m_main_sizer->Add(m_plater, 1, wxEXPAND);
-        m_plater->set_bed_shape({ { 0.0, 0.0 }, { 200.0, 0.0 }, { 200.0, 200.0 }, { 0.0, 200.0 } }, 0.0, {}, {}, true);
+        m_plater->set_default_bed_shape();
+#if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
+        m_plater->get_collapse_toolbar().set_enabled(true);
+#else
         m_plater->get_collapse_toolbar().set_enabled(false);
+#endif // !ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
         m_plater->collapse_sidebar(true);
         m_plater->Show();
         break;
     }
     }
-
-#ifdef _MSW_DARK_MODE
-    // Sizer with buttons for mode changing
-    m_plater->sidebar().show_mode_sizer(wxGetApp().tabs_as_menu() || m_layout != ESettingsLayout::Old);
-#endif
 
 #ifdef __WXMSW__
     if (update_scaling_state != State::noUpdate)
@@ -538,24 +480,11 @@ void MainFrame::update_layout()
     }
 #endif //__WXMSW__
 
-//#ifdef __APPLE__
-//    // Using SetMinSize() on Mac messes up the window position in some cases
-//    // cf. https://groups.google.com/forum/#!topic/wx-users/yUKPBBfXWO0
-//    // So, if we haven't possibility to set MinSize() for the MainFrame, 
-//    // set the MinSize() as a half of regular  for the m_plater and m_tabpanel, when settings layout is in slNew mode
-//    // Otherwise, MainFrame will be maximized by height
-//    if (m_layout == ESettingsLayout::New) {
-//        wxSize size = wxGetApp().get_min_size();
-//        size.SetHeight(int(0.5 * size.GetHeight()));
-//        m_plater->SetMinSize(size);
-//        m_tabpanel->SetMinSize(size);
-//    }
-//#endif
+    if (m_layout == ESettingsLayout::Old)
+        m_tabpanel->InsertNewPage(0, m_plater, _L("Plater"), "", true);
 
-#ifdef __APPLE__
-    m_plater->sidebar().change_top_border_for_mode_sizer(m_layout != ESettingsLayout::Old);
-#endif
-    
+    update_topbars();
+
     Layout();
     Thaw();
 }
@@ -611,7 +540,8 @@ void MainFrame::shutdown()
 	wxGetApp().other_instance_message_handler()->shutdown(this);
     // Save the slic3r.ini.Usually the ini file is saved from "on idle" callback,
     // but in rare cases it may not have been called yet.
-    wxGetApp().app_config->save();
+    if (wxGetApp().app_config->dirty())
+        wxGetApp().app_config->save();
 //         if (m_plater)
 //             m_plater->print = undef;
 //         Slic3r::GUI::deregister_on_request_update_callback();
@@ -620,6 +550,13 @@ void MainFrame::shutdown()
     // to avoid any manipulations with them from App->wxEVT_IDLE after of the mainframe closing 
     wxGetApp().tabs_list.clear();
     wxGetApp().plater_ = nullptr;
+}
+
+GalleryDialog* MainFrame::gallery_dialog()
+{
+    if (!m_gallery_dialog)
+        m_gallery_dialog = new GalleryDialog(this);
+    return m_gallery_dialog;
 }
 
 void MainFrame::update_title()
@@ -663,32 +600,89 @@ void MainFrame::update_title()
     SetTitle(title);
 }
 
+static wxString GetTooltipForSettingsButton(PrinterTechnology pt)
+{
+    std::string tooltip = _u8L("Switch to Settings") + "\n" + "[" + shortkey_ctrl_prefix() + "2] - " + _u8L("Print Settings Tab") +
+                                                       "\n" + "[" + shortkey_ctrl_prefix() + "3] - " + (pt == ptFFF ? _u8L("Filament Settings Tab") : _u8L("Material Settings Tab")) +
+                                                       "\n" + "[" + shortkey_ctrl_prefix() + "4] - " + _u8L("Printer Settings Tab");
+    return from_u8(tooltip);
+}
+
+void MainFrame::update_topbars()
+{
+    if (wxGetApp().is_gcode_viewer())
+        return;
+
+    const bool show_login = !wxGetApp().app_config->has("show_login_button") || wxGetApp().app_config->get_bool("show_login_button");
+    m_tmp_top_bar->ShowUserAccount(show_login);
+    m_tabpanel->ShowUserAccount(show_login);
+
+    if (!show_login) {
+        if (auto user_account = wxGetApp().plater()->get_user_account();
+            user_account && user_account->is_logged())
+            user_account->do_logout();
+    }
+}
+
+void MainFrame::set_callbacks_for_topbar_menus()
+{
+    m_bar_menus.set_workspaces_menu_callbacks(
+        []()                             -> int         { return wxGetApp().get_mode(); },
+        [](/*ConfigOptionMode*/int mode) -> void        { wxGetApp().save_mode(mode); },
+        [](/*ConfigOptionMode*/int mode) -> std::string { return wxGetApp().get_mode_btn_color(mode); }
+    );
+
+    m_bar_menus.set_account_menu_callbacks(
+        []() -> void { wxGetApp().plater()->act_with_user_account(); },
+        [this]() -> void {
+            wxString preferences_item = _L("Show Log in button in application top bar");
+            wxString msg =
+                _L("PrusaSlicer will remember your choice.") + "\n\n" +
+                format_wxstr(_L("Visit \"Preferences\" and check \"%1%\"\nto changes your choice."), preferences_item);
+
+            MessageDialog msg_dlg(this, msg, _L("PrusaSlicer: Don't ask me again"), wxOK | wxCANCEL | wxICON_INFORMATION);
+            if (msg_dlg.ShowModal() == wxID_OK) {
+                wxGetApp().app_config->set("show_login_button", "0");
+
+                m_bar_menus.RemoveHideLoginItem();
+                update_topbars();
+            }
+        },
+        []() -> TopBarMenus::UserAccountInfo {
+            if (auto user_account = wxGetApp().plater()->get_user_account())
+                return { user_account->is_logged(),
+                         user_account->get_username(),
+                         user_account->get_avatar_path(true) };
+            return TopBarMenus::UserAccountInfo();
+        }
+    );
+
+    // we need "Hide Log in button" menu item only till "show_login_button" wasn't changed
+    if (wxGetApp().app_config->has("show_login_button"))
+        m_bar_menus.RemoveHideLoginItem();
+}
+
 void MainFrame::init_tabpanel()
 {
+    wxGetApp().update_ui_colours_from_appconfig();
+
+    set_callbacks_for_topbar_menus();
+
+    if (wxGetApp().is_editor()) {
+        m_tmp_top_bar = new TopBar(this, &m_bar_menus, [this]() -> void { select_tab(); });
+        m_tmp_top_bar->SetFont(Slic3r::GUI::wxGetApp().normal_font());
+        m_tmp_top_bar->Hide();
+    }
+
     // wxNB_NOPAGETHEME: Disable Windows Vista theme for the Notebook background. The theme performance is terrible on Windows 10
     // with multiple high resolution displays connected.
-#ifdef _MSW_DARK_MODE
-    if (wxGetApp().tabs_as_menu()) {
-        m_tabpanel = new wxSimplebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME);
-        wxGetApp().UpdateDarkUI(m_tabpanel);
-    }
-    else
-        m_tabpanel = new Notebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME, true);
-#else
-    m_tabpanel = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME);
-#endif
+    m_tabpanel = new TopBar(this, &m_bar_menus);
 
-#ifndef __WXOSX__ // Don't call SetFont under OSX to avoid name cutting in ObjectList
     m_tabpanel->SetFont(Slic3r::GUI::wxGetApp().normal_font());
-#endif
     m_tabpanel->Hide();
     m_settings_dialog.set_tabpanel(m_tabpanel);
 
-#ifdef __WXMSW__
     m_tabpanel->Bind(wxEVT_BOOKCTRL_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
-#else
-    m_tabpanel->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
-#endif
         if (int old_selection = e.GetOldSelection();
             old_selection != wxNOT_FOUND && old_selection < static_cast<int>(m_tabpanel->GetPageCount())) {
             Tab* old_tab = dynamic_cast<Tab*>(m_tabpanel->GetPage(old_selection));
@@ -703,16 +697,16 @@ void MainFrame::init_tabpanel()
         if (panel == nullptr || (tab != nullptr && !tab->supports_printer_technology(m_plater->printer_technology())))
             return;
 
+        // temporary fix - WebViewPanel is not inheriting from Tab -> would jump to select Plater
+        if (panel && !tab)
+            return;
+
         auto& tabs_list = wxGetApp().tabs_list;
         if (tab && std::find(tabs_list.begin(), tabs_list.end(), tab) != tabs_list.end()) {
             // On GTK, the wxEVT_NOTEBOOK_PAGE_CHANGED event is triggered
             // before the MainFrame is fully set up.
             tab->OnActivate();
             m_last_selected_tab = m_tabpanel->GetSelection();
-#ifdef _MSW_DARK_MODE
-            if (wxGetApp().tabs_as_menu())
-                tab->SetFocus();
-#endif
         }
         else
             select_tab(size_t(0)); // select Plater
@@ -734,8 +728,11 @@ void MainFrame::init_tabpanel()
         // Show a correct number of filament fields.
         // nozzle_diameter is undefined when SLA printer is selected
         if (full_config.has("nozzle_diameter")) {
-            m_plater->on_extruders_change(full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size());
+            m_plater->sidebar().set_extruders_count(full_config.option<ConfigOptionFloats>("nozzle_diameter")->values.size());
         }
+
+        if (wxGetApp().is_editor())
+            m_tmp_top_bar->SetSettingsButtonTooltip(GetTooltipForSettingsButton(m_plater->printer_technology()));
     }
 }
 
@@ -797,12 +794,140 @@ void MainFrame::register_win32_callbacks()
 
 void MainFrame::create_preset_tabs()
 {
-    wxGetApp().update_label_colours_from_appconfig();
     add_created_tab(new TabPrint(m_tabpanel), "cog");
     add_created_tab(new TabFilament(m_tabpanel), "spool");
     add_created_tab(new TabSLAPrint(m_tabpanel), "cog");
     add_created_tab(new TabSLAMaterial(m_tabpanel), "resin");
     add_created_tab(new TabPrinter(m_tabpanel), wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology() == ptFFF ? "printer" : "sla_printer");
+    
+    m_connect_webview = new ConnectWebViewPanel(m_tabpanel);
+    m_printer_webview = new PrinterWebViewPanel(m_tabpanel, L"");
+    // new created tabs have to be hidden by default
+    m_connect_webview->Hide();
+    m_printer_webview->Hide();
+
+}
+
+void MainFrame::add_connect_webview_tab()
+{
+    if (m_connect_webview_added) {
+        m_connect_webview->resend_config();
+        return;
+    }
+    // parameters of InsertNewPage (to prevent ambigous overloaded function)
+    // insert "Connect" tab to position next to "Printer" tab
+    // order of tabs: Plater - Print Settings - Filaments - Printers - Prusa Connect - Prusa Link
+
+    int n = m_tabpanel->FindPage(wxGetApp().get_tab(Preset::TYPE_PRINTER)) + 1;
+    wxWindow* page = m_connect_webview;
+    const wxString text(L"Prusa Connect");
+    const std::string bmp_name = "";
+    bool bSelect = false;
+    m_tabpanel->InsertNewPage(n, page, text, bmp_name, bSelect);
+    m_connect_webview->load_default_url_delayed();
+    m_connect_webview_added = true;
+}
+void MainFrame::remove_connect_webview_tab()
+{
+    if (!m_connect_webview_added) {
+        return;
+    }
+    int n = m_tabpanel->FindPage(m_connect_webview);
+    if (m_tabpanel->GetSelection() == n)
+        m_tabpanel->SetSelection(0);
+    m_tabpanel->RemovePage(size_t(n));
+    m_connect_webview_added = false;
+    m_connect_webview->logout();
+}
+
+void MainFrame::show_printer_webview_tab(DynamicPrintConfig* dpc)
+{
+    // if physical printer is selected
+    if (dpc && dpc->option<ConfigOptionEnum<PrintHostType>>("host_type")->value != htPrusaConnect) {
+        std::string url = dpc->opt_string("print_host");
+
+        if (url.find("http://") != 0 && url.find("https://") != 0) {
+            url = "http://" + url;
+        }
+
+        // set password / api key
+        if (dynamic_cast<const ConfigOptionEnum<AuthorizationType>*>(dpc->option("printhost_authorization_type"))->value == AuthorizationType::atKeyPassword) {
+            set_printer_webview_api_key(dpc->opt_string("printhost_apikey"));
+        }
+#if 0 // The user password authentication is not working in prusa link as of now.
+        else {
+            mset_printer_webview_credentials(dpc->opt_string("printhost_user"), dpc->opt_string("printhost_password"));
+        }
+#endif // 0
+        // add printer or change url
+        if (get_printer_webview_tab_added()) {
+            set_printer_webview_tab_url(from_u8(url));
+        }
+        else {
+            add_printer_webview_tab(from_u8(url));
+        }
+    }
+    // if physical printer isn't selected, so delete page from TopBar
+    else {
+        if (m_tabpanel->GetPageText(m_tabpanel->GetSelection()) == _L("Physical Printer"))
+            select_tab(size_t(0));
+        remove_printer_webview_tab();
+    }
+}
+
+void MainFrame::add_printer_webview_tab(const wxString& url)
+{
+    if (m_printer_webview_added) {
+        set_printer_webview_tab_url(url);
+        return;
+    }
+    m_printer_webview_added = true;
+    // add as the last (rightmost) panel
+    m_tabpanel->AddNewPage(m_printer_webview, _L("Physical Printer"), "");
+    m_printer_webview->set_default_url(url);
+    m_printer_webview->load_default_url_delayed();
+}
+void MainFrame::remove_printer_webview_tab()
+{
+    if (!m_printer_webview_added) {
+        return;
+    }
+    m_printer_webview_added = false;
+    m_printer_webview->Hide();
+    m_tabpanel->RemovePage(m_tabpanel->FindPage(m_printer_webview));
+}
+void MainFrame::set_printer_webview_tab_url(const wxString& url)
+{
+    if (!m_printer_webview_added) {
+        add_printer_webview_tab(url);
+        return;
+    }
+    m_printer_webview->clear();
+    m_printer_webview->set_default_url(url);
+
+    if (m_tabpanel->GetSelection() == m_tabpanel->FindPage(m_printer_webview)) {
+        m_printer_webview->load_url(url);
+    } else {
+        m_printer_webview->load_default_url_delayed();
+    }
+}
+
+void MainFrame::set_printer_webview_api_key(const std::string& key)
+{
+    m_printer_webview->set_api_key(key);
+}
+void MainFrame::set_printer_webview_credentials(const std::string& usr, const std::string& psk)
+{
+    m_printer_webview->set_credentials(usr, psk);
+}
+
+void Slic3r::GUI::MainFrame::refresh_account_menu(bool avatar/* = false */)
+{
+    // Update User name in TopBar
+    m_bar_menus.UpdateAccountMenu();
+
+    m_tabpanel->GetTopBarItemsCtrl()->UpdateAccountButton(avatar);
+    m_tmp_top_bar->GetTopBarItemsCtrl()->UpdateAccountButton(avatar);
 }
 
 void MainFrame::add_created_tab(Tab* panel,  const std::string& bmp_name /*= ""*/)
@@ -812,12 +937,7 @@ void MainFrame::add_created_tab(Tab* panel,  const std::string& bmp_name /*= ""*
     const auto printer_tech = wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology();
 
     if (panel->supports_printer_technology(printer_tech))
-#ifdef _MSW_DARK_MODE
-        if (!wxGetApp().tabs_as_menu())
-            dynamic_cast<Notebook*>(m_tabpanel)->AddPage(panel, panel->title(), bmp_name);
-        else
-#endif
-        m_tabpanel->AddPage(panel, panel->title());
+        m_tabpanel->AddNewPage(panel, panel->title(), bmp_name);
 }
 
 bool MainFrame::is_active_and_shown_tab(Tab* tab)
@@ -829,9 +949,6 @@ bool MainFrame::is_active_and_shown_tab(Tab* tab)
 
     if (m_layout == ESettingsLayout::Dlg)
         return m_settings_dialog.IsShown();
-
-    if (m_layout == ESettingsLayout::New)
-        return m_main_sizer->IsShown(m_tabpanel);
     
     return true;
 }
@@ -894,7 +1011,7 @@ bool MainFrame::can_export_supports() const
     const PrintObjects& objects = m_plater->sla_print().objects();
     for (const SLAPrintObject* object : objects)
     {
-        if (object->has_mesh(slaposPad) || object->has_mesh(slaposSupportTree))
+        if (!object->support_mesh().empty() || !object->pad_mesh().empty())
         {
             can_export = true;
             break;
@@ -951,7 +1068,7 @@ bool MainFrame::can_eject() const
 
 bool MainFrame::can_slice() const
 {
-    bool bg_proc = wxGetApp().app_config->get("background_processing") == "1";
+    bool bg_proc = wxGetApp().app_config->get_bool("background_processing");
     return (m_plater != nullptr) ? !m_plater->model().objects.empty() && !bg_proc : false;
 }
 
@@ -960,7 +1077,6 @@ bool MainFrame::can_change_view() const
     switch (m_layout)
     {
     default:                   { return false; }
-    case ESettingsLayout::New: { return m_plater->IsShown(); }
     case ESettingsLayout::Dlg: { return true; }
     case ESettingsLayout::Old: { 
         int page_id = m_tabpanel->GetSelection();
@@ -1000,10 +1116,10 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     wxGetApp().update_fonts(this);
     this->SetFont(this->normal_font());
 
-#ifdef _MSW_DARK_MODE
-    // update common mode sizer
-    if (!wxGetApp().tabs_as_menu())
-        dynamic_cast<Notebook*>(m_tabpanel)->Rescale();
+#ifdef _WIN32
+    if (m_tmp_top_bar && m_tmp_top_bar->IsShown())
+        m_tmp_top_bar->Rescale();
+    m_tabpanel->Rescale();
 #endif
 
     // update Plater
@@ -1014,8 +1130,9 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
         for (auto tab : wxGetApp().tabs_list)
             tab->msw_rescale();
 
-    for (size_t id = 0; id < m_menubar->GetMenuCount(); id++)
-        msw_rescale_menu(m_menubar->GetMenu(id));
+    wxGetApp().searcher().dlg_msw_rescale();
+
+    return; // #ysFIXME - delete_after_testing - It looks like next code is no need any more
 
     // Workarounds for correct Window rendering after rescale
 
@@ -1044,27 +1161,50 @@ void MainFrame::on_sys_color_changed()
     wxBusyCursor wait;
 
     // update label colors in respect to the system mode
-    wxGetApp().init_label_colours();
+    wxGetApp().init_ui_colours();
+
+    if (wxGetApp().is_gcode_viewer()) {
+        MenuFactory::sys_color_changed(m_menubar);
+        return;
+    }
+
+    // but if there are some ui colors in appconfig, they have to be applied
+    wxGetApp().update_ui_colours_from_appconfig();
 #ifdef __WXMSW__
     wxGetApp().UpdateDarkUI(m_tabpanel);
- //   m_statusbar->update_dark_ui();
-#ifdef _MSW_DARK_MODE
-    // update common mode sizer
-    if (!wxGetApp().tabs_as_menu())
-        dynamic_cast<Notebook*>(m_tabpanel)->Rescale();
+    wxGetApp().UpdateDarkUI(m_tmp_top_bar);
 #endif
-#endif
+    m_tabpanel->OnColorsChanged();
+    m_tmp_top_bar->OnColorsChanged();
 
     // update Plater
     wxGetApp().plater()->sys_color_changed();
 
     // update Tabs
-    for (auto tab : wxGetApp().tabs_list)
+    for (Tab* tab : wxGetApp().tabs_list)
         tab->sys_color_changed();
+
+    if (m_connect_webview)
+        m_connect_webview->sys_color_changed();
+    if (m_printer_webview)
+        m_printer_webview->sys_color_changed();
 
     MenuFactory::sys_color_changed(m_menubar);
 
     this->Refresh();
+
+    wxGetApp().searcher().dlg_sys_color_changed();
+}
+
+void MainFrame::update_mode_markers()
+{
+    // update markers in common mode sizer
+    m_tmp_top_bar->UpdateModeMarkers();
+    m_tabpanel->UpdateModeMarkers();
+
+    // update mode markers in tabs
+    for (auto tab : wxGetApp().tabs_list)
+        tab->update_mode_markers();
 }
 
 #ifdef _MSC_VER
@@ -1077,9 +1217,46 @@ static const wxString sep = " - ";
 static const wxString sep_space = "";
 #endif
 
+static void append_about_menu_item(wxMenu* target_menu, int insert_pos = wxNOT_FOUND)
+{
+    if (wxGetApp().is_editor())
+        append_menu_item(target_menu, wxID_ANY, wxString::Format(_L("&About %s"), SLIC3R_APP_NAME), _L("Show about dialog"),
+            [](wxCommandEvent&) { Slic3r::GUI::about(); }, nullptr, nullptr, []() {return true; }, nullptr, insert_pos);
+    else
+        append_menu_item(target_menu, wxID_ANY, wxString::Format(_L("&About %s"), GCODEVIEWER_APP_NAME), _L("Show about dialog"),
+            [](wxCommandEvent&) { Slic3r::GUI::about(); }, nullptr, nullptr, []() {return true; }, nullptr, insert_pos);
+}
+
+#ifdef __APPLE__
+static void init_macos_application_menu(wxMenuBar* menu_bar, MainFrame* main_frame)
+{
+    wxMenu* apple_menu = menu_bar->OSXGetAppleMenu();
+    if (apple_menu != nullptr) {
+        append_about_menu_item(apple_menu, 0);
+
+        // This fixes a bug on macOS where the quit command doesn't emit window close events.
+        // wx bug: https://trac.wxwidgets.org/ticket/18328
+        apple_menu->Bind(wxEVT_MENU, [main_frame](wxCommandEvent&) { main_frame->Close(); }, wxID_EXIT);
+    }
+}
+#endif // __APPLE__
+
 static wxMenu* generate_help_menu()
 {
     wxMenu* helpMenu = new wxMenu();
+
+    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
+        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
+        [](wxCommandEvent&) { wxGetApp().open_web_page_localized("https://www.prusa3d.com/slicerweb"); });
+    // TRN Item from "Help" menu
+    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&Quick Start"), SLIC3R_APP_NAME),
+        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
+        [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("https://help.prusa3d.com/article/first-print-with-prusaslicer_1753", nullptr, false); });
+    // TRN Item from "Help" menu
+    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("Sample &G-codes and Models"), SLIC3R_APP_NAME),
+        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
+        [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("https://help.prusa3d.com/article/sample-g-codes_529630", nullptr, false); });
+    helpMenu->AppendSeparator();
     append_menu_item(helpMenu, wxID_ANY, _L("Prusa 3D &Drivers"), _L("Open the Prusa3D drivers download page in your browser"),
         [](wxCommandEvent&) { wxGetApp().open_web_page_localized("https://www.prusa3d.com/downloads"); });
     append_menu_item(helpMenu, wxID_ANY, _L("Software &Releases"), _L("Open the software releases page in your browser"),
@@ -1088,9 +1265,6 @@ static wxMenu* generate_help_menu()
 //#            wxTheApp->check_version(1);
 //#        });
 //#        $versioncheck->Enable(wxTheApp->have_version_check);
-    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
-        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
-        [](wxCommandEvent&) { wxGetApp().open_web_page_localized("https://www.prusa3d.com/slicerweb"); });
 //        append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Manual"), SLIC3R_APP_NAME),
 //                                             wxString::Format(_L("Open the %s manual in your browser"), SLIC3R_APP_NAME),
 //            [this](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("http://manual.slic3r.org/"); });
@@ -1101,13 +1275,14 @@ static wxMenu* generate_help_menu()
         [](wxCommandEvent&) { Slic3r::GUI::desktop_open_datadir_folder(); });
     append_menu_item(helpMenu, wxID_ANY, _L("Report an I&ssue"), wxString::Format(_L("Report an issue on %s"), SLIC3R_APP_NAME),
         [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("https://github.com/prusa3d/slic3r/issues/new", nullptr, false); });
-    if (wxGetApp().is_editor())
-        append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&About %s"), SLIC3R_APP_NAME), _L("Show about dialog"),
-            [](wxCommandEvent&) { Slic3r::GUI::about(); });
-    else
-        append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&About %s"), GCODEVIEWER_APP_NAME), _L("Show about dialog"),
-            [](wxCommandEvent&) { Slic3r::GUI::about(); });
-    append_menu_item(helpMenu, wxID_ANY, _L("Show Tip of the Day"), _L("Opens Tip of the day notification in bottom right corner or shows another tip if already opened."),
+#ifndef __APPLE__
+    append_about_menu_item(helpMenu);
+#endif // __APPLE__
+    append_menu_item(helpMenu, wxID_ANY, _L("Show Tip of the Day")
+#if 0//debug
+        + "\tCtrl+Shift+T"
+#endif
+        ,_L("Opens Tip of the day notification in bottom right corner or shows another tip if already opened."),
         [](wxCommandEvent&) { wxGetApp().plater()->get_notification_manager()->push_hint_notification(false); });
     helpMenu->AppendSeparator();
     append_menu_item(helpMenu, wxID_ANY, _L("Keyboard Shortcuts") + sep + "&?", _L("Show the list of the keyboard shortcuts"),
@@ -1127,10 +1302,10 @@ static void add_common_view_menu_items(wxMenu* view_menu, MainFrame* mainFrame, 
     append_menu_item(view_menu, wxID_ANY, _L("Iso") + sep + "&0", _L("Iso View"), [mainFrame](wxCommandEvent&) { mainFrame->select_view("iso"); },
         "", nullptr, [can_change_view]() { return can_change_view(); }, mainFrame);
     view_menu->AppendSeparator();
-    //TRN To be shown in the main menu View->Top 
+    //TRN Main menu: View->Top 
     append_menu_item(view_menu, wxID_ANY, _L("Top") + sep + "&1", _L("Top View"), [mainFrame](wxCommandEvent&) { mainFrame->select_view("top"); },
         "", nullptr, [can_change_view]() { return can_change_view(); }, mainFrame);
-    //TRN To be shown in the main menu View->Bottom 
+    //TRN Main menu: View->Bottom 
     append_menu_item(view_menu, wxID_ANY, _L("Bottom") + sep + "&2", _L("Bottom View"), [mainFrame](wxCommandEvent&) { mainFrame->select_view("bottom"); },
         "", nullptr, [can_change_view]() { return can_change_view(); }, mainFrame);
     append_menu_item(view_menu, wxID_ANY, _L("Front") + sep + "&3", _L("Front View"), [mainFrame](wxCommandEvent&) { mainFrame->select_view("front"); },
@@ -1183,7 +1358,6 @@ void MainFrame::init_menubar_as_editor()
                             recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
                         }
                     wxGetApp().app_config->set_recent_projects(recent_projects);
-                    wxGetApp().app_config->save();
                 }
             }
             }, wxID_FILE1, wxID_FILE9);
@@ -1211,7 +1385,7 @@ void MainFrame::init_menubar_as_editor()
         fileMenu->AppendSeparator();
 
         wxMenu* import_menu = new wxMenu();
-        append_menu_item(import_menu, wxID_ANY, _L("Import STL/OBJ/AM&F/3MF") + dots + "\tCtrl+I", _L("Load a model"),
+        append_menu_item(import_menu, wxID_ANY, _L("Import STL/3MF/STEP/OBJ/AM&F") + dots + "\tCtrl+I", _L("Load a model"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->add_model(); }, "import_plater", nullptr,
             [this](){return m_plater != nullptr; }, this);
         
@@ -1223,6 +1397,10 @@ void MainFrame::init_menubar_as_editor()
             [this](wxCommandEvent&) { if (m_plater) m_plater->import_sl1_archive(); }, "import_plater", nullptr,
             [this](){return m_plater != nullptr && m_plater->get_ui_job_worker().is_idle(); }, this);
     
+        append_menu_item(import_menu, wxID_ANY, _L("Import ZIP Archive") + dots, _L("Load a ZIP archive"),
+            [this](wxCommandEvent&) { if (m_plater) m_plater->import_zip_archive(); }, "import_plater", nullptr,
+            [this]() {return m_plater != nullptr; }, this);
+
         import_menu->AppendSeparator();
         append_menu_item(import_menu, wxID_ANY, _L("Import &Config") + dots + "\tCtrl+L", _L("Load exported configuration file"),
             [this](wxCommandEvent&) { load_config_file(); }, "import_config", nullptr,
@@ -1255,10 +1433,6 @@ void MainFrame::init_menubar_as_editor()
         append_menu_item(export_menu, wxID_ANY, _L("Export Plate as STL/OBJ &Including Supports") + dots, _L("Export current plate as STL/OBJ including supports"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_stl_obj(true); }, "export_plater", nullptr,
             [this](){return can_export_supports(); }, this);
-// Deprecating AMF export. Let's wait for user feedback.
-//        append_menu_item(export_menu, wxID_ANY, _L("Export Plate as &AMF") + dots, _L("Export current plate as AMF"),
-//            [this](wxCommandEvent&) { if (m_plater) m_plater->export_amf(); }, "export_plater", nullptr,
-//            [this](){return can_export_model(); }, this);
         export_menu->AppendSeparator();
         append_menu_item(export_menu, wxID_ANY, _L("Export &Toolpaths as OBJ") + dots, _L("Export toolpaths as OBJ"),
             [this](wxCommandEvent&) { if (m_plater) m_plater->export_toolpaths_to_obj(); }, "export_plater", nullptr,
@@ -1275,34 +1449,21 @@ void MainFrame::init_menubar_as_editor()
             []() {return true; }, this);
         append_submenu(fileMenu, export_menu, wxID_ANY, _L("&Export"), "");
 
+        wxMenu* convert_menu = new wxMenu();
+        append_menu_item(convert_menu, wxID_ANY, _L("Convert ASCII G-code to &binary") + dots, _L("Convert a G-code file from ASCII to binary format"),
+            [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->convert_gcode_to_binary(); }, "convert_file", nullptr,
+            []() { return true; }, this);
+        append_menu_item(convert_menu, wxID_ANY, _L("Convert binary G-code to &ASCII") + dots, _L("Convert a G-code file from binary to ASCII format"),
+            [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->convert_gcode_to_ascii(); }, "convert_file", nullptr,
+            []() { return true; }, this);
+        append_submenu(fileMenu, convert_menu, wxID_ANY, _L("&Convert"), "");
+
 		append_menu_item(fileMenu, wxID_ANY, _L("Ejec&t SD Card / Flash Drive") + dots + "\tCtrl+T", _L("Eject SD card / Flash drive after the G-code was exported to it."),
 			[this](wxCommandEvent&) { if (m_plater) m_plater->eject_drive(); }, "eject_sd", nullptr,
 			[this]() {return can_eject(); }, this);
 
         fileMenu->AppendSeparator();
 
-#if 0
-        m_menu_item_repeat = nullptr;
-        append_menu_item(fileMenu, wxID_ANY, _L("Quick Slice") +dots+ "\tCtrl+U", _L("Slice a file into a G-code"),
-            [this](wxCommandEvent&) {
-                wxTheApp->CallAfter([this]() {
-                    quick_slice();
-                    m_menu_item_repeat->Enable(is_last_input_file());
-                }); }, "cog_go.png");
-        append_menu_item(fileMenu, wxID_ANY, _L("Quick Slice and Save As") +dots +"\tCtrl+Alt+U", _L("Slice a file into a G-code, save as"),
-            [this](wxCommandEvent&) {
-            wxTheApp->CallAfter([this]() {
-                    quick_slice(qsSaveAs);
-                    m_menu_item_repeat->Enable(is_last_input_file());
-                }); }, "cog_go.png");
-        m_menu_item_repeat = append_menu_item(fileMenu, wxID_ANY, _L("Repeat Last Quick Slice") +"\tCtrl+Shift+U", _L("Repeat last quick slice"),
-            [this](wxCommandEvent&) {
-            wxTheApp->CallAfter([this]() {
-                quick_slice(qsReslice);
-            }); }, "cog_go.png");
-        m_menu_item_repeat->Enable(false);
-        fileMenu->AppendSeparator();
-#endif
         m_menu_item_reslice_now = append_menu_item(fileMenu, wxID_ANY, _L("(Re)Slice No&w") + "\tCtrl+R", _L("Start new slicing process"),
             [this](wxCommandEvent&) { reslice_now(); }, "re_slice", nullptr,
             [this]() { return m_plater != nullptr && can_reslice(); }, this);
@@ -1376,7 +1537,7 @@ void MainFrame::init_menubar_as_editor()
 
         editMenu->AppendSeparator();
         append_menu_item(editMenu, wxID_ANY, _L("Searc&h") + "\tCtrl+F",
-            _L("Search in settings"), [this](wxCommandEvent&) { m_plater->search(m_plater->IsShown()); },
+            _L("Search in settings"), [](wxCommandEvent&) { wxGetApp().show_search_dialog(); },
             "search", nullptr, []() {return true; }, this);
     }
 
@@ -1412,11 +1573,10 @@ void MainFrame::init_menubar_as_editor()
 
         windowMenu->AppendSeparator();
         append_menu_item(windowMenu, wxID_ANY, _L("Shape Gallery"), _L("Open the dialog to modify shape gallery"),
-            [this](wxCommandEvent&) { 
-                GalleryDialog dlg(this, true);
-                if (dlg.ShowModal() == wxID_OK) {
+            [this](wxCommandEvent&) {
+                if (gallery_dialog()->show(true) == wxID_OK) {
                     wxArrayString input_files;
-                    dlg.get_input_files(input_files);
+                    m_gallery_dialog->get_input_files(input_files);
                     if (!input_files.IsEmpty())
                         m_plater->sidebar().obj_list()->load_shape_object_from_gallery(input_files);
                 }
@@ -1428,7 +1588,7 @@ void MainFrame::init_menubar_as_editor()
         
         windowMenu->AppendSeparator();
         append_menu_item(windowMenu, wxID_ANY, _L("Open New Instance") + "\tCtrl+Shift+I", _L("Open a new PrusaSlicer instance"),
-            [](wxCommandEvent&) { start_new_slicer(); }, "", nullptr, [this]() {return m_plater != nullptr && wxGetApp().app_config->get("single_instance") != "1"; }, this);
+            [](wxCommandEvent&) { start_new_slicer(); }, "", nullptr, [this]() {return m_plater != nullptr && !wxGetApp().app_config->get_bool("single_instance"); }, this);
 
         windowMenu->AppendSeparator();
         append_menu_item(windowMenu, wxID_ANY, _L("Compare Presets")/* + "\tCtrl+F"*/, _L("Compare presets"), 
@@ -1444,11 +1604,9 @@ void MainFrame::init_menubar_as_editor()
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show &Labels") + sep + "E", _L("Show object/instance labels in 3D scene"),
             [this](wxCommandEvent&) { m_plater->show_view3D_labels(!m_plater->are_view3D_labels_shown()); }, this,
             [this]() { return m_plater->is_view3D_shown(); }, [this]() { return m_plater->are_view3D_labels_shown(); }, this);
-#if ENABLE_PREVIEW_LAYOUT
         append_menu_check_item(viewMenu, wxID_ANY, _L("Show Legen&d") + sep + "L", _L("Show legend in preview"),
             [this](wxCommandEvent&) { m_plater->show_legend(!m_plater->is_legend_shown()); }, this,
             [this]() { return m_plater->is_preview_shown(); }, [this]() { return m_plater->is_legend_shown(); }, this);
-#endif // ENABLE_PREVIEW_LAYOUT
         append_menu_check_item(viewMenu, wxID_ANY, _L("&Collapse Sidebar") + sep + "Shift+" + sep_space + "Tab", _L("Collapse sidebar"),
             [this](wxCommandEvent&) { m_plater->collapse_sidebar(!m_plater->is_sidebar_collapsed()); }, this,
             []() { return true; }, [this]() { return m_plater->is_sidebar_collapsed(); }, this);
@@ -1465,41 +1623,44 @@ void MainFrame::init_menubar_as_editor()
     // Help menu
     auto helpMenu = generate_help_menu();
 
+#ifndef __APPLE__
+    // append menus for Menu button from TopBar
+
+    m_bar_menus.AppendMenuItem(fileMenu, _L("&File"));
+    if (editMenu) 
+        m_bar_menus.AppendMenuItem(editMenu, _L("&Edit"));
+
+    m_bar_menus.AppendMenuSeparaorItem();
+
+    m_bar_menus.AppendMenuItem(windowMenu, _L("&Window"));
+    if (viewMenu) 
+        m_bar_menus.AppendMenuItem(viewMenu, _L("&View"));
+    
+    m_bar_menus.AppendMenuItem(wxGetApp().get_config_menu(this), _L("&Configuration"));
+
+    m_bar_menus.AppendMenuSeparaorItem();
+
+    m_bar_menus.AppendMenuItem(helpMenu, _L("&Help"));
+
+#else
+
     // menubar
     // assign menubar to frame after appending items, otherwise special items
     // will not be handled correctly
     m_menubar = new wxMenuBar();
+    m_menubar->SetFont(this->normal_font());
     m_menubar->Append(fileMenu, _L("&File"));
     if (editMenu) m_menubar->Append(editMenu, _L("&Edit"));
     m_menubar->Append(windowMenu, _L("&Window"));
     if (viewMenu) m_menubar->Append(viewMenu, _L("&View"));
     // Add additional menus from C++
-    wxGetApp().add_config_menu(m_menubar);
+    m_menubar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
     m_menubar->Append(helpMenu, _L("&Help"));
 
-#ifdef _MSW_DARK_MODE
-    if (wxGetApp().tabs_as_menu()) {
-        // Add separator 
-        m_menubar->Append(new wxMenu(), "          ");
-        add_tabs_as_menu(m_menubar, this, this);
-    }
-#endif
     SetMenuBar(m_menubar);
 
-#ifdef _MSW_DARK_MODE
-    if (wxGetApp().tabs_as_menu())
-        m_menubar->EnableTop(6, false);
-#endif
+    init_macos_application_menu(m_menubar, this);
 
-#ifdef __APPLE__
-    // This fixes a bug on Mac OS where the quit command doesn't emit window close events
-    // wx bug: https://trac.wxwidgets.org/ticket/18328
-    wxMenu* apple_menu = m_menubar->OSXGetAppleMenu();
-    if (apple_menu != nullptr) {
-        apple_menu->Bind(wxEVT_MENU, [this](wxCommandEvent &) {
-            Close();
-        }, wxID_EXIT);
-    }
 #endif // __APPLE__
 
     if (plater()->printer_technology() == ptSLA)
@@ -1550,12 +1711,19 @@ void MainFrame::init_menubar_as_gcodeviewer()
             "", nullptr, [this]() { return !m_plater->get_last_loaded_gcode().empty(); }, this);
 #endif // __APPLE__
         fileMenu->AppendSeparator();
+        append_menu_item(fileMenu, wxID_ANY, _L("Convert ASCII G-code to &binary") + dots, _L("Convert a G-code file from ASCII to binary format"),
+            [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->convert_gcode_to_binary(); }, "convert_file", nullptr,
+            []() { return true; }, this);
+        append_menu_item(fileMenu, wxID_ANY, _L("Convert binary G-code to &ASCII") + dots, _L("Convert a G-code file from binary to ASCII format"),
+            [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->convert_gcode_to_ascii(); }, "convert_file", nullptr,
+            []() { return true; }, this);
+        fileMenu->AppendSeparator();
         append_menu_item(fileMenu, wxID_ANY, _L("Export &Toolpaths as OBJ") + dots, _L("Export toolpaths as OBJ"),
             [this](wxCommandEvent&) { if (m_plater != nullptr) m_plater->export_toolpaths_to_obj(); }, "export_plater", nullptr,
             [this]() {return can_export_toolpaths(); }, this);
         append_menu_item(fileMenu, wxID_ANY, _L("Open &PrusaSlicer") + dots, _L("Open PrusaSlicer"),
             [](wxCommandEvent&) { start_new_slicer(); }, "", nullptr,
-            []() {return true; }, this);
+            []() { return true; }, this);
         fileMenu->AppendSeparator();
         append_menu_item(fileMenu, wxID_EXIT, _L("&Quit"), wxString::Format(_L("Quit %s"), SLIC3R_APP_NAME),
             [this](wxCommandEvent&) { Close(false); });
@@ -1566,12 +1734,10 @@ void MainFrame::init_menubar_as_gcodeviewer()
     if (m_plater != nullptr) {
         viewMenu = new wxMenu();
         add_common_view_menu_items(viewMenu, this, std::bind(&MainFrame::can_change_view, this));
-#if ENABLE_PREVIEW_LAYOUT
         viewMenu->AppendSeparator();
-        append_menu_check_item(viewMenu, wxID_ANY, _L("Show legen&d") + sep + "L", _L("Show legend"),
+        append_menu_check_item(viewMenu, wxID_ANY, _L("Show Legen&d") + sep + "L", _L("Show legend"),
             [this](wxCommandEvent&) { m_plater->show_legend(!m_plater->is_legend_shown()); }, this,
             [this]() { return m_plater->is_preview_shown(); }, [this]() { return m_plater->is_legend_shown(); }, this);
-#endif // ENABLE_PREVIEW_LAYOUT
     }
 
     // helpmenu
@@ -1581,19 +1747,12 @@ void MainFrame::init_menubar_as_gcodeviewer()
     m_menubar->Append(fileMenu, _L("&File"));
     if (viewMenu != nullptr) m_menubar->Append(viewMenu, _L("&View"));
     // Add additional menus from C++
-    wxGetApp().add_config_menu(m_menubar);
+    m_menubar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
     m_menubar->Append(helpMenu, _L("&Help"));
     SetMenuBar(m_menubar);
 
 #ifdef __APPLE__
-    // This fixes a bug on Mac OS where the quit command doesn't emit window close events
-    // wx bug: https://trac.wxwidgets.org/ticket/18328
-    wxMenu* apple_menu = m_menubar->OSXGetAppleMenu();
-    if (apple_menu != nullptr) {
-        apple_menu->Bind(wxEVT_MENU, [this](wxCommandEvent&) {
-            Close();
-            }, wxID_EXIT);
-    }
+    init_macos_application_menu(m_menubar, this);
 #endif // __APPLE__
 }
 
@@ -1608,138 +1767,11 @@ void MainFrame::update_menubar()
     m_changeable_menu_items[miSend]         ->SetItemLabel((is_fff ? _L("S&end G-code")           : _L("S&end to print")) + dots    + "\tCtrl+Shift+G");
 
     m_changeable_menu_items[miMaterialTab]  ->SetItemLabel((is_fff ? _L("&Filament Settings Tab") : _L("Mate&rial Settings Tab"))   + "\tCtrl+3");
-    m_changeable_menu_items[miMaterialTab]  ->SetBitmap(create_menu_bitmap(is_fff ? "spool"   : "resin"));
+    m_changeable_menu_items[miMaterialTab]  ->SetBitmap(*get_bmp_bundle(is_fff ? "spool"   : "resin"));
 
-    m_changeable_menu_items[miPrinterTab]   ->SetBitmap(create_menu_bitmap(is_fff ? "printer" : "sla_printer"));
+    m_changeable_menu_items[miPrinterTab]   ->SetBitmap(*get_bmp_bundle(is_fff ? "printer" : "sla_printer"));
 }
 
-#if 0
-// To perform the "Quck Slice", "Quick Slice and Save As", "Repeat last Quick Slice" and "Slice to SVG".
-void MainFrame::quick_slice(const int qs)
-{
-//     my $progress_dialog;
-    wxString input_file;
-//  eval
-//     {
-    // validate configuration
-    auto config = wxGetApp().preset_bundle->full_config();
-    auto valid = config.validate();
-    if (! valid.empty()) {
-        show_error(this, valid);
-        return;
-    }
-
-    // select input file
-    if (!(qs & qsReslice)) {
-        wxFileDialog dlg(this, _L("Choose a file to slice (STL/OBJ/AMF/3MF/PRUSA):"),
-            wxGetApp().app_config->get_last_dir(), "",
-            file_wildcards(FT_MODEL), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-        if (dlg.ShowModal() != wxID_OK)
-            return;
-        input_file = dlg.GetPath();
-        if (!(qs & qsExportSVG))
-            m_qs_last_input_file = input_file;
-    }
-    else {
-        if (m_qs_last_input_file.IsEmpty()) {
-            //wxMessageDialog dlg(this, _L("No previously sliced file."),
-            MessageDialog dlg(this, _L("No previously sliced file."),
-                _L("Error"), wxICON_ERROR | wxOK);
-            dlg.ShowModal();
-            return;
-        }
-        if (std::ifstream(m_qs_last_input_file.ToUTF8().data())) {
-            //wxMessageDialog dlg(this, _L("Previously sliced file (")+m_qs_last_input_file+_L(") not found."),
-            MessageDialog dlg(this, _L("Previously sliced file (")+m_qs_last_input_file+_L(") not found."),
-                _L("File Not Found"), wxICON_ERROR | wxOK);
-            dlg.ShowModal();
-            return;
-        }
-        input_file = m_qs_last_input_file;
-    }
-    auto input_file_basename = get_base_name(input_file);
-    wxGetApp().app_config->update_skein_dir(get_dir_name(input_file));
-
-    auto bed_shape = Slic3r::Polygon::new_scale(config.option<ConfigOptionPoints>("bed_shape")->values);
-//     auto print_center = Slic3r::Pointf->new_unscale(bed_shape.bounding_box().center());
-// 
-//     auto sprint = new Slic3r::Print::Simple(
-//         print_center = > print_center,
-//         status_cb = > [](int percent, const wxString& msg) {
-//         m_progress_dialog->Update(percent, msg+"…");
-//     });
-
-    // keep model around
-    auto model = Slic3r::Model::read_from_file(input_file.ToUTF8().data());
-
-//     sprint->apply_config(config);
-//     sprint->set_model(model);
-
-    // Copy the names of active presets into the placeholder parser.
-//     wxGetApp().preset_bundle->export_selections(sprint->placeholder_parser);
-
-    // select output file
-    wxString output_file;
-    if (qs & qsReslice) {
-        if (!m_qs_last_output_file.IsEmpty())
-            output_file = m_qs_last_output_file;
-    } 
-    else if (qs & qsSaveAs) {
-        // The following line may die if the output_filename_format template substitution fails.
-        wxFileDialog dlg(this, from_u8((boost::format(_utf8(L("Save %s file as:"))) % ((qs & qsExportSVG) ? _L("SVG") : _L("G-code"))).str()),
-            wxGetApp().app_config->get_last_output_dir(get_dir_name(output_file)), get_base_name(input_file), 
-            qs & qsExportSVG ? file_wildcards(FT_SVG) : file_wildcards(FT_GCODE),
-            wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-        if (dlg.ShowModal() != wxID_OK)
-            return;
-        output_file = dlg.GetPath();
-        if (!(qs & qsExportSVG))
-            m_qs_last_output_file = output_file;
-        wxGetApp().app_config->update_last_output_dir(get_dir_name(output_file));
-    } 
-    else if (qs & qsExportPNG) {
-        wxFileDialog dlg(this, _L("Save zip file as:"),
-            wxGetApp().app_config->get_last_output_dir(get_dir_name(output_file)),
-            get_base_name(output_file), "*.sl1", wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-        if (dlg.ShowModal() != wxID_OK)
-            return;
-        output_file = dlg.GetPath();
-    }
-
-    // show processbar dialog
-    m_progress_dialog = new wxProgressDialog(_L("Slicing") + dots,
-        // TRN "Processing input_file_basename"
-        from_u8((boost::format(_utf8(L("Processing %s"))) % (input_file_basename + dots)).str()),
-        100, nullptr, wxPD_AUTO_HIDE);
-    m_progress_dialog->Pulse();
-    {
-//         my @warnings = ();
-//         local $SIG{ __WARN__ } = sub{ push @warnings, $_[0] };
-
-//         sprint->output_file(output_file);
-//         if (export_svg) {
-//             sprint->export_svg();
-//         }
-//         else if(export_png) {
-//             sprint->export_png();
-//         }
-//         else {
-//             sprint->export_gcode();
-//         }
-//         sprint->status_cb(undef);
-//         Slic3r::GUI::warning_catcher($self)->($_) for @warnings;
-    }
-    m_progress_dialog->Destroy();
-    m_progress_dialog = nullptr;
-
-    auto message = format(_L("%1% was successfully sliced."), input_file_basename);
-//     wxTheApp->notify(message);
-    //wxMessageDialog(this, message, _L("Slicing Done!"), wxOK | wxICON_INFORMATION).ShowModal();
-    MessageDialog(this, message, _L("Slicing Done!"), wxOK | wxICON_INFORMATION).ShowModal();
-//     };
-//     Slic3r::GUI::catch_error(this, []() { if (m_progress_dialog) m_progress_dialog->Destroy(); });
-}
-#endif
 
 void MainFrame::reslice_now()
 {
@@ -1807,11 +1839,25 @@ void MainFrame::load_config_file()
         return;
     wxFileDialog dlg(this, _L("Select configuration to load:"),
         !m_last_config.IsEmpty() ? get_dir_name(m_last_config) : wxGetApp().app_config->get_last_dir(),
-        "config.ini", "INI files (*.ini, *.gcode)|*.ini;*.INI;*.gcode;*.g", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-	wxString file;
+        "config.ini", "INI files (*.ini, *.gcode, *.bgcode)|*.ini;*.INI;*.gcode;*.g;*.bgcode;*.bgc", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+    wxString file;
     if (dlg.ShowModal() == wxID_OK)
         file = dlg.GetPath();
     if (! file.IsEmpty() && this->load_config_file(file.ToUTF8().data())) {
+        DynamicPrintConfig config = wxGetApp().preset_bundle->full_config();
+        const auto* post_process = config.opt<ConfigOptionStrings>("post_process");
+        if (post_process != nullptr && !post_process->values.empty()) {
+            const wxString msg = _L("The selected config file contains a post-processing script.\nPlease review the script carefully before exporting G-code.");
+            std::string text;
+            for (const std::string& s : post_process->values) {
+                text += s;
+            }
+
+            InfoDialog msg_dlg(nullptr, msg, from_u8(text), true, wxOK | wxICON_WARNING);
+            msg_dlg.set_caption(wxString(SLIC3R_APP_NAME " - ") + _L("Attention!"));
+            msg_dlg.ShowModal();
+        }
+
         wxGetApp().app_config->update_config_dir(get_dir_name(file));
         m_last_config = file;
     }
@@ -1829,7 +1875,7 @@ bool MainFrame::load_config_file(const std::string &path)
         return false;
     }
 
-    m_plater->check_selected_presets_visibility(ptFFF);
+    m_plater->notify_about_installed_presets();
     wxGetApp().load_current_presets();
     return true;
 }
@@ -1855,9 +1901,54 @@ void MainFrame::export_configbundle(bool export_physical_printers /*= false*/)
         file = dlg.GetPath();
     if (!file.IsEmpty()) {
         // Export the config bundle.
+#if wxUSE_SECRETSTORE
+        bool passwords_to_plain = false;
+        bool passwords_dialog_shown = false;
+#endif
+        // callback function thats going to be passed to preset bundle (so preset bundle doesnt have to include WX secret lib)
+        std::function<bool(const std::string&, const std::string&, std::string&)> load_password = [&](const std::string& printer_id, const std::string& opt, std::string& out_psswd)->bool{
+            out_psswd = std::string();
+#if wxUSE_SECRETSTORE
+            // First password prompts user with dialog
+            if (!passwords_dialog_shown) {
+                wxString msg = _L("Some of the exported printers contain passwords, which are stored in the system password store." 
+                                  " Do you want to include the passwords in the plain text form in the exported file?");
+                MessageDialog dlg_psswd(this, msg, wxMessageBoxCaptionStr, wxYES_NO | wxYES_DEFAULT | wxICON_QUESTION);
+                if (dlg_psswd.ShowModal() == wxID_YES)
+                    passwords_to_plain = true;
+                passwords_dialog_shown = true;
+            }
+            if (!passwords_to_plain)
+                return false;
+            wxSecretStore store = wxSecretStore::GetDefault();
+            wxString errmsg;
+            if (!store.IsOk(&errmsg)) {
+                std::string msg = GUI::format("%1% (%2%).", _u8L("Failed to load credentials from the system password store."), errmsg);
+                BOOST_LOG_TRIVIAL(error) << msg;
+                show_error(nullptr, msg);
+                // Do not try again. System store is not reachable.
+                passwords_to_plain = false;
+                return false;
+            }
+            const wxString service = GUI::format_wxstr(L"%1%/PhysicalPrinter/%2%/%3%", SLIC3R_APP_NAME, printer_id, opt);
+            wxString username;
+            wxSecretValue password;
+            if (!store.Load(service, username, password)) {
+                std::string msg = GUI::format(_u8L("Failed to load credentials from the system password store for printer %1%."), printer_id);
+                BOOST_LOG_TRIVIAL(error) << msg;
+                show_error(nullptr, msg);
+                return false;
+            }
+            out_psswd = into_u8(password.GetAsString());
+            return true;
+#else
+            return false;
+#endif // wxUSE_SECRETSTORE 
+        };
+
         wxGetApp().app_config->update_config_dir(get_dir_name(file));
         try {
-            wxGetApp().preset_bundle->export_configbundle(file.ToUTF8().data(), false, export_physical_printers);
+            wxGetApp().preset_bundle->export_configbundle(file.ToUTF8().data(), false, export_physical_printers, load_password);
         } catch (const std::exception &ex) {
 			show_error(this, ex.what());
         }
@@ -1941,6 +2032,13 @@ void MainFrame::load_config(const DynamicPrintConfig& config)
 #endif
 }
 
+void MainFrame::update_search_lines(const std::string search_line)
+{
+    wxString search = from_u8(search_line);
+    m_tabpanel   ->UpdateSearch(search);
+    m_tmp_top_bar->UpdateSearch(search);
+}
+
 void MainFrame::select_tab(Tab* tab)
 {
     if (!tab)
@@ -1953,6 +2051,8 @@ void MainFrame::select_tab(Tab* tab)
 
 void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
 {
+    if (!wxGetApp().is_editor())
+        return;
     bool tabpanel_was_hidden = false;
 
     // Controls on page are created on active page of active tab now.
@@ -1963,14 +2063,7 @@ void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
 
         if (m_tabpanel->GetSelection() != (int)new_selection)
             m_tabpanel->SetSelection(new_selection);
-#ifdef _MSW_DARK_MODE
-        if (wxGetApp().tabs_as_menu()) {
-            if (Tab* cur_tab = dynamic_cast<Tab*>(m_tabpanel->GetPage(new_selection)))
-                update_marker_for_tabs_menu((m_layout == ESettingsLayout::Old ? m_menubar : m_settings_dialog.menubar()), cur_tab->title(), m_layout == ESettingsLayout::Old);
-            else if (tab == 0 && m_layout == ESettingsLayout::Old)
-                m_plater->get_current_canvas3D()->render();
-        }
-#endif
+
         if (tab == 0 && m_layout == ESettingsLayout::Old)
             m_plater->canvas3D()->render();
         else if (was_hidden) {
@@ -1984,9 +2077,6 @@ void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
         if (tab==0) {
             if (m_settings_dialog.IsShown())
                 this->SetFocus();
-            // plater should be focused for correct navigation inside search window
-            if (m_plater->canvas3D()->is_search_pressed())
-                m_plater->SetFocus();
             return;
         }
         // Show/Activate Settings Dialog
@@ -2014,26 +2104,11 @@ void MainFrame::select_tab(size_t tab/* = size_t(-1)*/)
         if (m_settings_dialog.IsIconized())
             m_settings_dialog.Iconize(false);
     }
-    else if (m_layout == ESettingsLayout::New) {
-        m_main_sizer->Show(m_plater, tab == 0);
-        tabpanel_was_hidden = !m_main_sizer->IsShown(m_tabpanel);
-        select(tabpanel_was_hidden);
-        m_main_sizer->Show(m_tabpanel, tab != 0);
-
-        // plater should be focused for correct navigation inside search window
-        if (tab == 0)
-            m_plater->SetFocus();
-        Layout();
-    }
     else {
         select(false);
-#ifdef _MSW_DARK_MODE
-        if (wxGetApp().tabs_as_menu() && tab == 0)
-            m_plater->SetFocus();
-#endif
     }
 
-    // When we run application in ESettingsLayout::New or ESettingsLayout::Dlg mode, tabpanel is hidden from the very beginning
+    // When we run application in ESettingsLayout::Dlg mode, tabpanel is hidden from the very beginning
     // and as a result Tab::update_changed_tree_ui() function couldn't update m_is_nonsys_values values,
     // which are used for update TreeCtrl and "revert_buttons".
     // So, force the call of this function for Tabs, if tab panel was hidden
@@ -2081,24 +2156,6 @@ void MainFrame::on_presets_changed(SimpleEvent &event)
     }
 }
 
-// #ys_FIXME_to_delete
-void MainFrame::on_value_changed(wxCommandEvent& event)
-{
-    auto *tab = dynamic_cast<Tab*>(event.GetEventObject());
-    wxASSERT(tab != nullptr);
-    if (tab == nullptr)
-        return;
-
-    auto opt_key = event.GetString();
-    if (m_plater) {
-        m_plater->on_config_change(*tab->get_config()); // propagate config change events to the plater
-        if (opt_key == "extruders_count") {
-            auto value = event.GetInt();
-            m_plater->on_extruders_change(value);
-        }
-    }
-}
-
 void MainFrame::on_config_changed(DynamicPrintConfig* config) const
 {
     if (m_plater)
@@ -2117,17 +2174,17 @@ void MainFrame::add_to_recent_projects(const wxString& filename)
             recent_projects.push_back(into_u8(m_recent_projects.GetHistoryFile(i)));
         }
         wxGetApp().app_config->set_recent_projects(recent_projects);
-        wxGetApp().app_config->save();
     }
 }
 
 void MainFrame::technology_changed()
 {
-    // upadte DiffDlg
-    diff_dialog.update_presets();
-
-    // update menu titles
     PrinterTechnology pt = plater()->printer_technology();
+    m_tmp_top_bar->SetSettingsButtonTooltip(GetTooltipForSettingsButton(pt));
+
+    if (!m_menubar)
+        return;
+    // update menu titles
     if (int id = m_menubar->FindMenu(pt == ptFFF ? _L("Material Settings") : _L("Filament Settings")); id != wxNOT_FOUND)
         m_menubar->SetMenuLabel(id , pt == ptSLA ? _L("Material Settings") : _L("Filament Settings"));
 
@@ -2141,11 +2198,13 @@ void MainFrame::technology_changed()
 // Update the UI based on the current preferences.
 void MainFrame::update_ui_from_settings()
 {
-//    const bool bp_on = wxGetApp().app_config->get("background_processing") == "1";
+//    const bool bp_on = wxGetApp().app_config->get_bool("background_processing");
 //     m_menu_item_reslice_now->Enable(!bp_on);
 //    m_plater->sidebar().show_reslice(!bp_on);
 //    m_plater->sidebar().show_export(bp_on);
 //    m_plater->sidebar().Layout();
+
+    update_topbars();
 
     if (m_plater)
         m_plater->update_ui_from_settings();
@@ -2172,23 +2231,13 @@ std::string MainFrame::get_dir_name(const wxString &full_name) const
 // ----------------------------------------------------------------------------
 
 SettingsDialog::SettingsDialog(MainFrame* mainframe)
-:DPIFrame(NULL, wxID_ANY, wxString(SLIC3R_APP_NAME) + " - " + _L("Settings"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE, "settings_dialog"),
+:DPIFrame(NULL, wxID_ANY, wxString(SLIC3R_APP_NAME) + " - " + _L("Settings"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE, "settings_dialog", mainframe->normal_font().GetPointSize()),
 //: DPIDialog(mainframe, wxID_ANY, wxString(SLIC3R_APP_NAME) + " - " + _L("Settings"), wxDefaultPosition, wxDefaultSize,
 //        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER | wxMINIMIZE_BOX | wxMAXIMIZE_BOX, "settings_dialog"),
     m_main_frame(mainframe)
 {
     if (wxGetApp().is_gcode_viewer())
         return;
-
-#if defined(__WXMSW__)
-    // ys_FIXME! temporary workaround for correct font scaling
-    // Because of from wxWidgets 3.1.3 auto rescaling is implemented for the Fonts,
-    // From the very beginning set dialog font to the wxSYS_DEFAULT_GUI_FONT
-    this->SetFont(wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT));
-#else
-    this->SetFont(wxGetApp().normal_font());
-    this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-#endif // __WXMSW__
 
     // Load the icon either from the exe, or from the ico file.
 #if _WIN32
@@ -2215,10 +2264,12 @@ SettingsDialog::SettingsDialog(MainFrame* mainframe)
 #else /* __APPLE__ */
                 case WXK_CONTROL_F:
 #endif /* __APPLE__ */
-                case 'F': { m_main_frame->plater()->search(false); break; }
+                case 'F': { wxGetApp().show_search_dialog(); break; }
                 default:break;
                 }
             }
+
+            evt.Skip();
         };
 
         if (evt.IsShown()) {
@@ -2234,14 +2285,11 @@ SettingsDialog::SettingsDialog(MainFrame* mainframe)
     //just hide the Frame on closing
     this->Bind(wxEVT_CLOSE_WINDOW, [this](wxCloseEvent& evt) { this->Hide(); });
 
-#ifdef _MSW_DARK_MODE
-    if (wxGetApp().tabs_as_menu()) {
-        // menubar
-        m_menubar = new wxMenuBar();
-        add_tabs_as_menu(m_menubar, mainframe, this);
-        this->SetMenuBar(m_menubar);
-    }
-#endif
+    this->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+        event.Skip();
+        if (m_tabpanel)
+            m_tabpanel->UpdateSearchSizeAndPosition();
+    });
 
     // initialize layout
     auto sizer = new wxBoxSizer(wxVERTICAL);
@@ -2259,6 +2307,11 @@ SettingsDialog::SettingsDialog(MainFrame* mainframe)
     SetSize(GetMinSize());
 #endif
     Layout();
+
+    Bind(wxEVT_MOVE, [](wxMoveEvent& event) {
+        wxGetApp().searcher().update_dialog_position();
+        event.Skip();
+    });
 }
 
 void SettingsDialog::on_dpi_changed(const wxRect& suggested_rect)
@@ -2266,22 +2319,22 @@ void SettingsDialog::on_dpi_changed(const wxRect& suggested_rect)
     if (wxGetApp().is_gcode_viewer())
         return;
 
-    const int& em = em_unit();
-    const wxSize& size = wxSize(85 * em, 50 * em);
+// #ysFIXME - delete_after_testing
+//    const int& em = em_unit();
+//    const wxSize& size = wxSize(85 * em, 50 * em);
 
-#ifdef _MSW_DARK_MODE
-    // update common mode sizer
-    if (!wxGetApp().tabs_as_menu())
-        dynamic_cast<Notebook*>(m_tabpanel)->Rescale();
+#ifdef _WIN32
+    m_tabpanel->Rescale();
 #endif
 
     // update Tabs
     for (auto tab : wxGetApp().tabs_list)
         tab->msw_rescale();
 
-    SetMinSize(size);
-    Fit();
-    Refresh();
+// #ysFIXME - delete_after_testing
+//    SetMinSize(size);
+//    Fit();
+//    Refresh();
 }
 
 

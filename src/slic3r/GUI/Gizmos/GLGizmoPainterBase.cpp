@@ -1,4 +1,7 @@
-// Include GLGizmoBase.hpp before I18N.hpp as it includes some libigl code, which overrides our localization "L" macro.
+///|/ Copyright (c) Prusa Research 2019 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "GLGizmoPainterBase.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
@@ -19,11 +22,7 @@
 
 namespace Slic3r::GUI {
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
 std::shared_ptr<GLModel> GLGizmoPainterBase::s_sphere = nullptr;
-#else
-std::shared_ptr<GLIndexedVertexArray> GLGizmoPainterBase::s_sphere = nullptr;
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 GLGizmoPainterBase::GLGizmoPainterBase(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
@@ -32,16 +31,11 @@ GLGizmoPainterBase::GLGizmoPainterBase(GLCanvas3D& parent, const std::string& ic
 
 GLGizmoPainterBase::~GLGizmoPainterBase()
 {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     if (s_sphere != nullptr)
         s_sphere.reset();
-#else
-    if (s_sphere != nullptr && s_sphere->has_VBOs())
-        s_sphere->release_geometry();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 
-void GLGizmoPainterBase::data_changed()
+void GLGizmoPainterBase::data_changed(bool is_serializing)
 {
     if (m_state != On)
         return;
@@ -106,16 +100,12 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection) const
         if (is_left_handed)
             glsafe(::glFrontFace(GL_CW));
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
         const Camera& camera = wxGetApp().plater()->get_camera();
-        const Transform3d matrix = camera.get_view_matrix() * trafo_matrix;
-        shader->set_uniform("view_model_matrix", matrix);
+        const Transform3d& view_matrix = camera.get_view_matrix();
+        shader->set_uniform("view_model_matrix", view_matrix * trafo_matrix);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-        shader->set_uniform("normal_matrix", (Matrix3d)matrix.matrix().block(0, 0, 3, 3).inverse().transpose());
-#else
-        glsafe(::glPushMatrix());
-        glsafe(::glMultMatrixd(trafo_matrix.data()));
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+        const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * trafo_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
+        shader->set_uniform("view_normal_matrix", view_normal_matrix);
 
         // For printers with multiple extruders, it is necessary to pass trafo_matrix
         // to the shader input variable print_box.volume_world_matrix before
@@ -123,13 +113,7 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection) const
         // wrong transformation matrix is used for "Clipping of view".
         shader->set_uniform("volume_world_matrix", trafo_matrix);
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
         m_triangle_selectors[mesh_id]->render(m_imgui, trafo_matrix);
-#else
-        m_triangle_selectors[mesh_id]->render(m_imgui);
-
-        glsafe(::glPopMatrix());
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         if (is_left_handed)
             glsafe(::glFrontFace(GL_CCW));
     }
@@ -164,14 +148,7 @@ void GLGizmoPainterBase::render_cursor()
 
 void GLGizmoPainterBase::render_cursor_circle()
 {
-#if !ENABLE_GL_SHADERS_ATTRIBUTES
-    const Camera &camera   = wxGetApp().plater()->get_camera();
-    const float   zoom     = float(camera.get_zoom());
-    const float   inv_zoom = (zoom != 0.0f) ? 1.0f / zoom : 0.0f;
-#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
-
     const Size cnv_size = m_parent.get_canvas_size();
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     const float cnv_width  = float(cnv_size.get_width());
     const float cnv_height = float(cnv_size.get_height());
     if (cnv_width == 0.0f || cnv_height == 0.0f)
@@ -181,93 +158,115 @@ void GLGizmoPainterBase::render_cursor_circle()
     const float cnv_inv_height = 1.0f / cnv_height;
 
     const Vec2d center = m_parent.get_local_mouse_position();
-    const float radius = m_cursor_radius * float(wxGetApp().plater()->get_camera().get_zoom());
-#else
-    const float cnv_half_width  = 0.5f * float(cnv_size.get_width());
-    const float cnv_half_height = 0.5f * float(cnv_size.get_height());
-    if (cnv_half_width == 0.0f || cnv_half_height == 0.0f)
-        return;
-    const Vec2d mouse_pos(m_parent.get_local_mouse_position().x(), m_parent.get_local_mouse_position().y());
-    Vec2d center(mouse_pos.x() - cnv_half_width, cnv_half_height - mouse_pos.y());
-    center = center * inv_zoom;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+    const float zoom = float(wxGetApp().plater()->get_camera().get_zoom());
+    const float radius = m_cursor_radius * zoom;
 
-    glsafe(::glLineWidth(1.5f));
-#if !ENABLE_LEGACY_OPENGL_REMOVAL
-    static const std::array<float, 3> color = { 0.f, 1.f, 0.3f };
-    glsafe(::glColor3fv(color.data()));
-#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glLineWidth(1.5f));
+#endif // !SLIC3R_OPENGL_ES
+
     glsafe(::glDisable(GL_DEPTH_TEST));
 
-#if !ENABLE_GL_SHADERS_ATTRIBUTES
-    glsafe(::glPushMatrix());
-    glsafe(::glLoadIdentity());
-    // ensure that the circle is renderered inside the frustrum
-    glsafe(::glTranslated(0.0, 0.0, -(camera.get_near_z() + 0.5)));
-    // ensure that the overlay fits the frustrum near z plane
-    const double gui_scale = camera.get_gui_scale();
-    glsafe(::glScaled(gui_scale, gui_scale, 1.0));
-#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile()) {
+        glsafe(::glPushAttrib(GL_ENABLE_BIT));
+        glsafe(::glLineStipple(4, 0xAAAA));
+        glsafe(::glEnable(GL_LINE_STIPPLE));
+    }
+#endif // !SLIC3R_OPENGL_ES
 
-    glsafe(::glPushAttrib(GL_ENABLE_BIT));
-    glsafe(::glLineStipple(4, 0xAAAA));
-    glsafe(::glEnable(GL_LINE_STIPPLE));
-
-#if ENABLE_LEGACY_OPENGL_REMOVAL
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     if (!m_circle.is_initialized() || !m_old_center.isApprox(center) || std::abs(m_old_cursor_radius - radius) > EPSILON) {
         m_old_cursor_radius = radius;
-#else
-    if (!m_circle.is_initialized() || !m_old_center.isApprox(center) || std::abs(m_old_cursor_radius - m_cursor_radius) > EPSILON) {
-        m_old_cursor_radius = m_cursor_radius;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         m_old_center = center;
         m_circle.reset();
 
         GLModel::Geometry init_data;
-        static const unsigned int StepsCount = 32;
-        static const float StepSize = 2.0f * float(PI) / float(StepsCount);
-        init_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2 };
+        unsigned int steps_count = 0;
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            steps_count = (unsigned int)(2 * (4 + int(252 * (zoom - 1.0f) / (250.0f - 1.0f))));
+            init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P2 };
+#if !SLIC3R_OPENGL_ES
+        }
+        else {
+            steps_count = 32;
+            init_data.format = { GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2 };
+        }
+#endif // !SLIC3R_OPENGL_ES
+        const float step_size = 2.0f * float(PI) / float(steps_count);
         init_data.color  = { 0.0f, 1.0f, 0.3f, 1.0f };
-        init_data.reserve_vertices(StepsCount);
-        init_data.reserve_indices(StepsCount);
+        init_data.reserve_vertices(steps_count);
+        init_data.reserve_indices(steps_count);
 
         // vertices + indices
-        for (unsigned int i = 0; i < StepsCount; ++i) {
-            const float angle = float(i) * StepSize;
-#if ENABLE_GL_SHADERS_ATTRIBUTES
-            init_data.add_vertex(Vec2f(2.0f * ((center.x() + ::cos(angle) * radius) * cnv_inv_width - 0.5f),
-                                       -2.0f * ((center.y() + ::sin(angle) * radius) * cnv_inv_height - 0.5f)));
-#else
-            init_data.add_vertex(Vec2f(center.x() + ::cos(angle) * m_cursor_radius, center.y() + ::sin(angle) * m_cursor_radius));
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-            init_data.add_index(i);
+        for (unsigned int i = 0; i < steps_count; ++i) {
+#if !SLIC3R_OPENGL_ES
+            if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+                if (i % 2 != 0) continue;
+
+                const float angle_i = float(i) * step_size;
+                const unsigned int j = (i + 1) % steps_count;
+                const float angle_j = float(j) * step_size;
+                const Vec2d v_i(::cos(angle_i), ::sin(angle_i));
+                const Vec2d v_j(::cos(angle_j), ::sin(angle_j));
+                init_data.add_vertex(Vec2f(v_i.x(), v_i.y()));
+                init_data.add_vertex(Vec2f(v_j.x(), v_j.y()));
+                const size_t vcount = init_data.vertices_count();
+                init_data.add_line(vcount - 2, vcount - 1);
+#if !SLIC3R_OPENGL_ES
+            }
+            else {
+                const float angle = float(i) * step_size;
+                init_data.add_vertex(Vec2f(2.0f * ((center.x() + ::cos(angle) * radius) * cnv_inv_width - 0.5f),
+                  -2.0f * ((center.y() + ::sin(angle) * radius) * cnv_inv_height - 0.5f)));
+                init_data.add_index(i);
+            }
+#endif // !SLIC3R_OPENGL_ES
         }
 
         m_circle.init_from(std::move(init_data));
     }
 
-    GLShaderProgram* shader = GUI::wxGetApp().get_shader("flat");
+#if SLIC3R_OPENGL_ES
+    GLShaderProgram* shader = wxGetApp().get_shader("dashed_lines");
+#else
+    GLShaderProgram* shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
+#endif // SLIC3R_OPENGL_ES
     if (shader != nullptr) {
         shader->start_using();
-#if ENABLE_GL_SHADERS_ATTRIBUTES
-        shader->set_uniform("view_model_matrix", Transform3d::Identity());
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            const Transform3d view_model_matrix = Geometry::translation_transform(Vec3d(2.0f * (center.x() * cnv_inv_width - 0.5f), -2.0f * (center.y() * cnv_inv_height - 0.5f), 0.0)) *
+                Geometry::scale_transform(Vec3d(2.0f * radius * cnv_inv_width, 2.0f * radius * cnv_inv_height, 1.0f));
+            shader->set_uniform("view_model_matrix", view_model_matrix);
+#if !SLIC3R_OPENGL_ES
+        }
+        else
+            shader->set_uniform("view_model_matrix", Transform3d::Identity());
+#endif // !SLIC3R_OPENGL_ES
         shader->set_uniform("projection_matrix", Transform3d::Identity());
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+#if !SLIC3R_OPENGL_ES
+        if (OpenGLManager::get_gl_info().is_core_profile()) {
+#endif // !SLIC3R_OPENGL_ES
+            const std::array<int, 4>& viewport = wxGetApp().plater()->get_camera().get_viewport();
+            shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
+            shader->set_uniform("width", 0.25f);
+            shader->set_uniform("gap_size", 0.0f);
+#if !SLIC3R_OPENGL_ES
+        }
+#endif // !SLIC3R_OPENGL_ES
         m_circle.render();
         shader->stop_using();
     }
-#else
-    ::glBegin(GL_LINE_LOOP);
-    for (double angle=0; angle<2*M_PI; angle+=M_PI/20.)
-        ::glVertex2f(GLfloat(center.x()+m_cursor_radius*cos(angle)), GLfloat(center.y()+m_cursor_radius*sin(angle)));
-    glsafe(::glEnd());
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-    glsafe(::glPopAttrib());
-#if !ENABLE_GL_SHADERS_ATTRIBUTES
-    glsafe(::glPopMatrix());
-#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+#if !SLIC3R_OPENGL_ES
+    if (!OpenGLManager::get_gl_info().is_core_profile())
+        glsafe(::glPopAttrib());
+#endif // !SLIC3R_OPENGL_ES
     glsafe(::glEnable(GL_DEPTH_TEST));
 }
 
@@ -275,78 +274,44 @@ void GLGizmoPainterBase::render_cursor_circle()
 void GLGizmoPainterBase::render_cursor_sphere(const Transform3d& trafo) const
 {
     if (s_sphere == nullptr) {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         s_sphere = std::make_shared<GLModel>();
         s_sphere->init_from(its_make_sphere(1.0, double(PI) / 12.0));
-#else
-        s_sphere = std::make_shared<GLIndexedVertexArray>();
-        s_sphere->load_its_flat_shading(its_make_sphere(1.0, double(PI) / 12.0));
-        s_sphere->finalize_geometry(true);
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     GLShaderProgram* shader = wxGetApp().get_shader("flat");
     if (shader == nullptr)
         return;
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-#if ENABLE_WORLD_COORDINATE
     const Transform3d complete_scaling_matrix_inverse = Geometry::Transformation(trafo).get_scaling_factor_matrix().inverse();
-#else
-    const Transform3d complete_scaling_matrix_inverse = Geometry::Transformation(trafo).get_matrix(true, true, false, true).inverse();
-#endif // ENABLE_WORLD_COORDINATE
-    const bool is_left_handed = Geometry::Transformation(trafo).is_left_handed();
-
-#if !ENABLE_GL_SHADERS_ATTRIBUTES
-    glsafe(::glPushMatrix());
-    glsafe(::glMultMatrixd(trafo.data()));
-    // Inverse matrix of the instance scaling is applied so that the mark does not scale with the object.
-    glsafe(::glTranslatef(m_rr.hit.x(), m_rr.hit.y(), m_rr.hit.z()));
-    glsafe(::glMultMatrixd(complete_scaling_matrix_inverse.data()));
-    glsafe(::glScaled(m_cursor_radius, m_cursor_radius, m_cursor_radius));
-#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
-
-    if (is_left_handed)
-        glFrontFace(GL_CW);
 
     ColorRGBA render_color = { 0.0f, 0.0f, 0.0f, 0.25f };
     if (m_button_down == Button::Left)
         render_color = this->get_cursor_sphere_left_button_color();
     else if (m_button_down == Button::Right)
         render_color = this->get_cursor_sphere_right_button_color();
-#if ENABLE_LEGACY_OPENGL_REMOVAL
+
     shader->start_using();
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     const Camera& camera = wxGetApp().plater()->get_camera();
     Transform3d view_model_matrix = camera.get_view_matrix() * trafo *
-        Geometry::assemble_transform(m_rr.hit.cast<double>()) * complete_scaling_matrix_inverse *
-        Geometry::assemble_transform(Vec3d::Zero(), Vec3d::Zero(), m_cursor_radius * Vec3d::Ones());
+        Geometry::translation_transform(m_rr.hit.cast<double>()) * complete_scaling_matrix_inverse *
+        Geometry::scale_transform(m_cursor_radius * Vec3d::Ones());
 
     shader->set_uniform("view_model_matrix", view_model_matrix);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
+
+    const bool is_left_handed = Geometry::Transformation(view_model_matrix).is_left_handed();
+    if (is_left_handed)
+        glsafe(::glFrontFace(GL_CW));
 
     assert(s_sphere != nullptr);
     s_sphere->set_color(render_color);
-#else
-    glsafe(::glColor4fv(render_color.data()));
-
-    assert(s_sphere != nullptr);
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     s_sphere->render();
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
-    shader->stop_using();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
-
     if (is_left_handed)
-        glFrontFace(GL_CCW);
+        glsafe(::glFrontFace(GL_CCW));
 
-#if !ENABLE_GL_SHADERS_ATTRIBUTES
-    glsafe(::glPopMatrix());
-#endif // !ENABLE_GL_SHADERS_ATTRIBUTES
+    shader->stop_using();
 }
 
 
@@ -495,7 +460,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             pos = action == SLAGizmoEventType::MouseWheelDown
                       ? std::max(0., pos - 0.01)
                       : std::min(1., pos + 0.01);
-            m_c->object_clipper()->set_position(pos, true);
+            m_c->object_clipper()->set_position_by_ratio(pos, true);
             return true;
         }
         else if (alt_down) {
@@ -512,11 +477,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     const Selection     &selection                 = m_parent.get_selection();
                     const ModelObject   *mo                        = m_c->selection_info()->model_object();
                     const ModelInstance *mi                        = mo->instances[selection.get_instance_idx()];
-#if ENABLE_WORLD_COORDINATE
                     const Transform3d   trafo_matrix_not_translate = mi->get_transformation().get_matrix_no_offset() * mo->volumes[m_rr.mesh_id]->get_matrix_no_offset();
-#else
-                    const Transform3d   trafo_matrix_not_translate = mi->get_transformation().get_matrix(true) * mo->volumes[m_rr.mesh_id]->get_matrix(true);
-#endif // ENABLE_WORLD_COORDINATE
                     const Transform3d   trafo_matrix = mi->get_transformation().get_matrix() * mo->volumes[m_rr.mesh_id]->get_matrix();
                     m_triangle_selectors[m_rr.mesh_id]->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, this->get_clipping_plane_in_volume_coordinates(trafo_matrix), m_smart_fill_angle,
                                                                                    m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
@@ -531,7 +492,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
     }
 
     if (action == SLAGizmoEventType::ResetClippingPlane) {
-        m_c->object_clipper()->set_position(-1., false);
+        m_c->object_clipper()->set_position_by_ratio(-1., false);
         return true;
     }
 
@@ -542,7 +503,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         if (m_triangle_selectors.empty())
             return false;
 
-        EnforcerBlockerType new_state = EnforcerBlockerType::NONE;
+        TriangleStateType new_state = TriangleStateType::NONE;
         if (! shift_down) {
             if (action == SLAGizmoEventType::Dragging)
                 new_state = m_button_down == Button::Left ? this->get_left_button_state_type() : this->get_right_button_state_type();
@@ -555,11 +516,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         const ModelObject   *mo                          = m_c->selection_info()->model_object();
         const ModelInstance *mi                          = mo->instances[selection.get_instance_idx()];
         const Transform3d   instance_trafo               = mi->get_transformation().get_matrix();
-#if ENABLE_WORLD_COORDINATE
         const Transform3d   instance_trafo_not_translate = mi->get_transformation().get_matrix_no_offset();
-#else
-        const Transform3d   instance_trafo_not_translate = mi->get_transformation().get_matrix(true);
-#endif // ENABLE_WORLD_COORDINATE
 
         // Precalculate transformations of individual meshes.
         std::vector<Transform3d> trafo_matrices;
@@ -567,11 +524,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         for (const ModelVolume *mv : mo->volumes)
             if (mv->is_model_part()) {
                 trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
-#if ENABLE_WORLD_COORDINATE
                 trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix_no_offset());
-#else
-                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix(true));
-#endif // ENABLE_WORLD_COORDINATE
             }
 
         std::vector<std::vector<ProjectedMousePosition>> projected_mouse_positions_by_mesh = get_projected_mouse_positions(mouse_position, 1., trafo_matrices);
@@ -653,11 +606,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         const ModelObject   *mo                           = m_c->selection_info()->model_object();
         const ModelInstance *mi                           = mo->instances[selection.get_instance_idx()];
         const Transform3d    instance_trafo               = mi->get_transformation().get_matrix();
-#if ENABLE_WORLD_COORDINATE
         const Transform3d    instance_trafo_not_translate = mi->get_transformation().get_matrix_no_offset();
-#else
-        const Transform3d    instance_trafo_not_translate = mi->get_transformation().get_matrix(true);
-#endif // ENABLE_WORLD_COORDINATE
 
         // Precalculate transformations of individual meshes.
         std::vector<Transform3d> trafo_matrices;
@@ -665,11 +614,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         for (const ModelVolume *mv : mo->volumes)
             if (mv->is_model_part()) {
                 trafo_matrices.emplace_back(instance_trafo * mv->get_matrix());
-#if ENABLE_WORLD_COORDINATE
-                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix_no_offset());
-#else
-                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate * mv->get_matrix(true));
-#endif // ENABLE_WORLD_COORDINATE
+                trafo_matrices_not_translate.emplace_back(instance_trafo_not_translate* mv->get_matrix_no_offset());
             }
 
         // Now "click" into all the prepared points and spill paint around them.
@@ -925,11 +870,7 @@ ColorRGBA TriangleSelectorGUI::get_seed_fill_color(const ColorRGBA& base_color)
     return saturate(base_color, 0.75f);
 }
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
 void TriangleSelectorGUI::render(ImGuiWrapper* imgui, const Transform3d& matrix)
-#else
-void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 {
     static const ColorRGBA enforcers_color = { 0.47f, 0.47f, 1.0f, 1.0f };
     static const ColorRGBA blockers_color  = { 1.0f, 0.44f, 0.44f, 1.0f };
@@ -947,18 +888,10 @@ void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
 
     for (auto iva : {std::make_pair(&m_iva_enforcers, enforcers_color),
                      std::make_pair(&m_iva_blockers, blockers_color)}) {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         iva.first->set_color(iva.second);
         iva.first->render();
-#else
-        if (iva.first->has_VBOs()) {
-            shader->set_uniform("uniform_color", iva.second);
-            iva.first->render();
-        }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     for (auto& iva : m_iva_seed_fills) {
         size_t           color_idx = &iva - &m_iva_seed_fills.front();
         const ColorRGBA& color     = TriangleSelectorGUI::get_seed_fill_color(color_idx == 1 ? enforcers_color :
@@ -967,36 +900,8 @@ void TriangleSelectorGUI::render(ImGuiWrapper* imgui)
         iva.set_color(color);
         iva.render();
     }
-#else
-    for (auto& iva : m_iva_seed_fills)
-        if (iva.has_VBOs()) {
-            size_t                      color_idx = &iva - &m_iva_seed_fills.front();
-            const ColorRGBA& color                = TriangleSelectorGUI::get_seed_fill_color(color_idx == 1 ? enforcers_color :
-                                                                                             color_idx == 2 ? blockers_color :
-                                                                                                              GLVolume::NEUTRAL_COLOR);
-            shader->set_uniform("uniform_color", color);
-            iva.render();
-        }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     render_paint_contour(matrix);
-#else
-    render_paint_contour();
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-#else
-    if (m_paint_contour.has_VBO()) {
-        ScopeGuard guard_gouraud([shader]() { shader->start_using(); });
-        shader->stop_using();
-
-        auto *contour_shader = wxGetApp().get_shader("mm_contour");
-        contour_shader->start_using();
-        contour_shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
-        m_paint_contour.render();
-        contour_shader->stop_using();
-    }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 #ifdef PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
     if (imgui)
@@ -1012,7 +917,6 @@ void TriangleSelectorGUI::update_render_data()
     int              blc_cnt = 0;
     std::vector<int> seed_fill_cnt(m_iva_seed_fills.size(), 0);
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     for (auto* iva : { &m_iva_enforcers, &m_iva_blockers }) {
         iva->reset();
     }
@@ -1028,34 +932,21 @@ void TriangleSelectorGUI::update_render_data()
     std::array<GLModel::Geometry, 3> iva_seed_fills_data;
     for (auto& data : iva_seed_fills_data)
         data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
-#else
-    for (auto *iva : {&m_iva_enforcers, &m_iva_blockers})
-        iva->release_geometry();
-
-    for (auto &iva : m_iva_seed_fills)
-        iva.release_geometry();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     // small value used to offset triangles along their normal to avoid z-fighting
     static const float offset = 0.001f;
 
     for (const Triangle &tr : m_triangles) {
-        if (!tr.valid() || tr.is_split() || (tr.get_state() == EnforcerBlockerType::NONE && !tr.is_selected_by_seed_fill()))
+        if (!tr.valid() || tr.is_split() || (tr.get_state() == TriangleStateType::NONE && !tr.is_selected_by_seed_fill()))
             continue;
 
         int tr_state = int(tr.get_state());
-#if ENABLE_LEGACY_OPENGL_REMOVAL
-        GLModel::Geometry &iva = tr.is_selected_by_seed_fill()                   ? iva_seed_fills_data[tr_state] :
-                                 tr.get_state() == EnforcerBlockerType::ENFORCER ? iva_enforcers_data :
-                                                                                   iva_blockers_data;
-#else
-        GLIndexedVertexArray &iva = tr.is_selected_by_seed_fill()                   ? m_iva_seed_fills[tr_state] :
-                                    tr.get_state() == EnforcerBlockerType::ENFORCER ? m_iva_enforcers :
-                                                                                      m_iva_blockers;
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
-        int                  &cnt = tr.is_selected_by_seed_fill()                   ? seed_fill_cnt[tr_state] :
-                                    tr.get_state() == EnforcerBlockerType::ENFORCER ? enf_cnt :
-                                                                                      blc_cnt;
+        GLModel::Geometry &iva = tr.is_selected_by_seed_fill()                 ? iva_seed_fills_data[tr_state] :
+                                 tr.get_state() == TriangleStateType::ENFORCER ? iva_enforcers_data :
+                                                                                 iva_blockers_data;
+        int                  &cnt = tr.is_selected_by_seed_fill()                 ? seed_fill_cnt[tr_state] :
+                                    tr.get_state() == TriangleStateType::ENFORCER ? enf_cnt :
+                                                                                    blc_cnt;
         const Vec3f          &v0  = m_vertices[tr.verts_idxs[0]].v;
         const Vec3f          &v1  = m_vertices[tr.verts_idxs[1]].v;
         const Vec3f          &v2  = m_vertices[tr.verts_idxs[2]].v;
@@ -1064,21 +955,13 @@ void TriangleSelectorGUI::update_render_data()
         const Vec3f           n   = (v1 - v0).cross(v2 - v1).normalized();
         // small value used to offset triangles along their normal to avoid z-fighting
         const Vec3f    offset_n   = offset * n;
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         iva.add_vertex(v0 + offset_n, n);
         iva.add_vertex(v1 + offset_n, n);
         iva.add_vertex(v2 + offset_n, n);
         iva.add_triangle((unsigned int)cnt, (unsigned int)cnt + 1, (unsigned int)cnt + 2);
-#else
-        iva.push_geometry(v0 + offset_n, n);
-        iva.push_geometry(v1 + offset_n, n);
-        iva.push_geometry(v2 + offset_n, n);
-        iva.push_triangle(cnt, cnt + 1, cnt + 2);
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         cnt += 3;
     }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     if (!iva_enforcers_data.is_empty())
         m_iva_enforcers.init_from(std::move(iva_enforcers_data));
     if (!iva_blockers_data.is_empty())
@@ -1089,93 +972,7 @@ void TriangleSelectorGUI::update_render_data()
     }
 
     update_paint_contour();
-#else
-    for (auto *iva : {&m_iva_enforcers, &m_iva_blockers})
-        iva->finalize_geometry(true);
-
-    for (auto &iva : m_iva_seed_fills)
-        iva.finalize_geometry(true);
-
-    m_paint_contour.release_geometry();
-    std::vector<Vec2i> contour_edges = this->get_seed_fill_contour();
-    m_paint_contour.contour_vertices.reserve(contour_edges.size() * 6);
-    for (const Vec2i &edge : contour_edges) {
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.x());
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.y());
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(0)].v.z());
-
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.x());
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.y());
-        m_paint_contour.contour_vertices.emplace_back(m_vertices[edge(1)].v.z());
-    }
-
-    m_paint_contour.contour_indices.assign(m_paint_contour.contour_vertices.size() / 3, 0);
-    std::iota(m_paint_contour.contour_indices.begin(), m_paint_contour.contour_indices.end(), 0);
-    m_paint_contour.contour_indices_size = m_paint_contour.contour_indices.size();
-
-    m_paint_contour.finalize_geometry();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
-
-#if !ENABLE_LEGACY_OPENGL_REMOVAL
-void GLPaintContour::render() const
-{
-    assert(this->m_contour_VBO_id != 0);
-    assert(this->m_contour_EBO_id != 0);
-
-    glsafe(::glLineWidth(4.0f));
-
-    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->m_contour_VBO_id));
-    glsafe(::glVertexPointer(3, GL_FLOAT, 3 * sizeof(float), nullptr));
-
-    glsafe(::glEnableClientState(GL_VERTEX_ARRAY));
-
-    if (this->contour_indices_size > 0) {
-        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_contour_EBO_id));
-        glsafe(::glDrawElements(GL_LINES, GLsizei(this->contour_indices_size), GL_UNSIGNED_INT, nullptr));
-        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
-    }
-
-    glsafe(::glDisableClientState(GL_VERTEX_ARRAY));
-
-    glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
-}
-
-void GLPaintContour::finalize_geometry()
-{
-    assert(this->m_contour_VBO_id == 0);
-    assert(this->m_contour_EBO_id == 0);
-
-    if (!this->contour_vertices.empty()) {
-        glsafe(::glGenBuffers(1, &this->m_contour_VBO_id));
-        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, this->m_contour_VBO_id));
-        glsafe(::glBufferData(GL_ARRAY_BUFFER, this->contour_vertices.size() * sizeof(float), this->contour_vertices.data(), GL_STATIC_DRAW));
-        glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
-        this->contour_vertices.clear();
-    }
-
-    if (!this->contour_indices.empty()) {
-        glsafe(::glGenBuffers(1, &this->m_contour_EBO_id));
-        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, this->m_contour_EBO_id));
-        glsafe(::glBufferData(GL_ELEMENT_ARRAY_BUFFER, this->contour_indices.size() * sizeof(unsigned int), this->contour_indices.data(), GL_STATIC_DRAW));
-        glsafe(::glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
-        this->contour_indices.clear();
-    }
-}
-
-void GLPaintContour::release_geometry()
-{
-    if (this->m_contour_VBO_id) {
-        glsafe(::glDeleteBuffers(1, &this->m_contour_VBO_id));
-        this->m_contour_VBO_id = 0;
-    }
-    if (this->m_contour_EBO_id) {
-        glsafe(::glDeleteBuffers(1, &this->m_contour_EBO_id));
-        this->m_contour_EBO_id = 0;
-    }
-    this->clear();
-}
-#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 #ifdef PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
 void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
@@ -1212,91 +1009,48 @@ void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
         INVALID
     };
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     for (auto& va : m_varrays)
         va.reset();
-#else
-    for (auto& va : m_varrays)
-        va.release_geometry();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     std::array<int, 3> cnts;
 
     ::glScalef(1.01f, 1.01f, 1.01f);
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     std::array<GLModel::Geometry, 3> varrays_data;
     for (auto& data : varrays_data)
         data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3, GLModel::Geometry::EIndexType::UINT };
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     for (int tr_id=0; tr_id<int(m_triangles.size()); ++tr_id) {
         const Triangle& tr = m_triangles[tr_id];
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         GLModel::Geometry* va = nullptr;
-#else
-        GLIndexedVertexArray* va = nullptr;
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         int* cnt = nullptr;
         if (tr_id < m_orig_size_indices) {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
             va = &varrays_data[ORIGINAL];
-#else
-            va = &m_varrays[ORIGINAL];
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[ORIGINAL];
         }
         else if (tr.valid()) {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
             va = &varrays_data[SPLIT];
-#else
-            va = &m_varrays[SPLIT];
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[SPLIT];
         }
         else {
             if (! m_show_invalid)
                 continue;
-#if ENABLE_LEGACY_OPENGL_REMOVAL
             va = &varrays_data[INVALID];
-#else
-            va = &m_varrays[INVALID];
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
             cnt = &cnts[INVALID];
         }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         for (int i = 0; i < 3; ++i) {
             va->add_vertex(m_vertices[tr.verts_idxs[i]].v, Vec3f(0.0f, 0.0f, 1.0f));
         }
         va->add_uint_triangle((unsigned int)*cnt, (unsigned int)*cnt + 1, (unsigned int)*cnt + 2);
-#else
-        for (int i = 0; i < 3; ++i)
-            va->push_geometry(double(m_vertices[tr.verts_idxs[i]].v[0]),
-                              double(m_vertices[tr.verts_idxs[i]].v[1]),
-                              double(m_vertices[tr.verts_idxs[i]].v[2]),
-                              0., 0., 1.);
-        va->push_triangle(*cnt,
-            *cnt + 1,
-            *cnt + 2);
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
         *cnt += 3;
     }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     for (int i = 0; i < 3; ++i) {
         if (!varrays_data[i].is_empty())
             m_varrays[i].init_from(std::move(varrays_data[i]));
     }
-#else
-//    for (auto* iva : { &m_iva_enforcers, &m_iva_blockers })
-//        iva->finalize_geometry(true);
-//
-//    for (auto& iva : m_iva_seed_fills)
-//        iva.finalize_geometry(true);
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     GLShaderProgram* curr_shader = wxGetApp().get_current_shader();
     if (curr_shader != nullptr)
         curr_shader->stop_using();
@@ -1305,16 +1059,12 @@ void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
     if (shader != nullptr) {
         shader->start_using();
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
         const Camera& camera = wxGetApp().plater()->get_camera();
         shader->set_uniform("view_model_matrix", camera.get_view_matrix());
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     ::glPolygonMode( GL_FRONT_AND_BACK, GL_LINE );
     for (vtype i : {ORIGINAL, SPLIT, INVALID}) {
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         GLModel& va = m_varrays[i];
         switch (i) {
         case ORIGINAL: va.set_color({ 0.0f, 0.0f, 1.0f, 1.0f }); break;
@@ -1322,32 +1072,17 @@ void TriangleSelectorGUI::render_debug(ImGuiWrapper* imgui)
         case INVALID:  va.set_color({ 1.0f, 1.0f, 0.0f, 1.0f }); break;
         }
         va.render();
-#else
-        GLIndexedVertexArray& va = m_varrays[i];
-        va.finalize_geometry(true);
-        if (va.has_VBOs()) {
-            switch (i) {
-            case ORIGINAL : ::glColor3f(0.f, 0.f, 1.f); break;
-            case SPLIT    : ::glColor3f(1.f, 0.f, 0.f); break;
-            case INVALID  : ::glColor3f(1.f, 1.f, 0.f); break;
-            }
-            va.render();
-        }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     }
     ::glPolygonMode( GL_FRONT_AND_BACK, GL_FILL );
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
         shader->stop_using();
     }
 
     if (curr_shader != nullptr)
         curr_shader->start_using();
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 #endif // PRUSASLICER_TRIANGLE_SELECTOR_DEBUG
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
 void TriangleSelectorGUI::update_paint_contour()
 {
     m_paint_contour.reset();
@@ -1357,10 +1092,8 @@ void TriangleSelectorGUI::update_paint_contour()
     init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
     init_data.reserve_vertices(2 * contour_edges.size());
     init_data.reserve_indices(2 * contour_edges.size());
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     init_data.color = ColorRGBA::WHITE();
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-// 
+ 
     // vertices + indices
     unsigned int vertices_count = 0;
     for (const Vec2i& edge : contour_edges) {
@@ -1374,11 +1107,7 @@ void TriangleSelectorGUI::update_paint_contour()
         m_paint_contour.init_from(std::move(init_data));
 }
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
 void TriangleSelectorGUI::render_paint_contour(const Transform3d& matrix)
-#else
-void TriangleSelectorGUI::render_paint_contour()
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 {
     auto* curr_shader = wxGetApp().get_current_shader();
     if (curr_shader != nullptr)
@@ -1389,11 +1118,9 @@ void TriangleSelectorGUI::render_paint_contour()
         contour_shader->start_using();
 
         contour_shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
-#if ENABLE_GL_SHADERS_ATTRIBUTES
         const Camera& camera = wxGetApp().plater()->get_camera();
         contour_shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
         contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
         m_paint_contour.render();
         contour_shader->stop_using();
@@ -1402,6 +1129,5 @@ void TriangleSelectorGUI::render_paint_contour()
     if (curr_shader != nullptr)
         curr_shader->start_using();
 }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 } // namespace Slic3r::GUI

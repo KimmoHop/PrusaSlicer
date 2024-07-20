@@ -1,3 +1,12 @@
+#/|/ Copyright (c) Prusa Research 2018 - 2023 Tomáš Mészáros @tamasmeszaros, David Kocík @kocikdav, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak, Filip Sykala @Jony01, Oleksandra Iushchenko @YuSanka, Lukáš Hejl @hejllukas, Vojtěch Král @vojtechkral
+#/|/ Copyright (c) 2023 Pedro Lamas @PedroLamas
+#/|/ Copyright (c) 2020 Sergey Kovalev @RandoMan70
+#/|/ Copyright (c) 2021 Boleslaw Ciesielski
+#/|/ Copyright (c) 2019 Spencer Owen @spuder
+#/|/ Copyright (c) 2019 Stephan Reichhelm @stephanr
+#/|/
+#/|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+#/|/
 cmake_minimum_required(VERSION 3.13)
 project(libslic3r_gui)
 
@@ -8,6 +17,18 @@ set(SLIC3R_GUI_SOURCES
     pchheader.hpp
     GUI/AboutDialog.cpp
     GUI/AboutDialog.hpp
+    GUI/ArrangeSettingsDialogImgui.hpp
+    GUI/ArrangeSettingsDialogImgui.cpp
+    GUI/UserAccountCommunication.cpp
+    GUI/UserAccountCommunication.hpp
+    GUI/UserAccountSession.cpp
+    GUI/UserAccountSession.hpp
+    GUI/UserAccount.cpp
+    GUI/UserAccount.hpp
+    GUI/WebViewDialog.cpp
+    GUI/WebViewDialog.hpp
+    GUI/WebView.cpp
+    GUI/WebView.hpp
     GUI/SysInfoDialog.cpp
     GUI/SysInfoDialog.hpp
     GUI/KBShortcutsDialog.cpp
@@ -27,6 +48,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLShader.hpp    
     GUI/GLCanvas3D.hpp
     GUI/GLCanvas3D.cpp
+    GUI/SceneRaycaster.hpp
+    GUI/SceneRaycaster.cpp	
     GUI/OpenGLManager.hpp
     GUI/OpenGLManager.cpp
     GUI/Selection.hpp
@@ -37,6 +60,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmosCommon.hpp
     GUI/Gizmos/GLGizmoBase.cpp
     GUI/Gizmos/GLGizmoBase.hpp
+    GUI/Gizmos/GLGizmoSlaBase.cpp
+    GUI/Gizmos/GLGizmoSlaBase.hpp	
+    GUI/Gizmos/GLGizmoEmboss.cpp
+    GUI/Gizmos/GLGizmoEmboss.hpp
     GUI/Gizmos/GLGizmoMove.cpp
     GUI/Gizmos/GLGizmoMove.hpp
     GUI/Gizmos/GLGizmoRotate.cpp
@@ -59,8 +86,14 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoSeam.hpp
     GUI/Gizmos/GLGizmoSimplify.cpp
     GUI/Gizmos/GLGizmoSimplify.hpp
+    GUI/Gizmos/GLGizmoSVG.cpp
+    GUI/Gizmos/GLGizmoSVG.hpp
     GUI/Gizmos/GLGizmoMmuSegmentation.cpp
     GUI/Gizmos/GLGizmoMmuSegmentation.hpp
+    GUI/Gizmos/GLGizmoMeasure.cpp
+    GUI/Gizmos/GLGizmoMeasure.hpp
+    GUI/LibVGCode/LibVGCodeWrapper.hpp
+    GUI/LibVGCode/LibVGCodeWrapper.cpp
     GUI/GLSelectionRectangle.cpp
     GUI/GLSelectionRectangle.hpp
     GUI/GLModel.hpp
@@ -89,14 +122,24 @@ set(SLIC3R_GUI_SOURCES
     GUI/GUI_Geometry.hpp
     GUI/I18N.cpp
     GUI/I18N.hpp
+    GUI/IconManager.cpp
+    GUI/IconManager.hpp
     GUI/MainFrame.cpp
     GUI/MainFrame.hpp
+    GUI/UpdatesUIManager.cpp
+    GUI/UpdatesUIManager.hpp
+    GUI/FrequentlyChangedParameters.cpp
+    GUI/FrequentlyChangedParameters.hpp
+    GUI/Sidebar.cpp
+    GUI/Sidebar.hpp
     GUI/Plater.cpp
     GUI/Plater.hpp
     GUI/PresetComboBoxes.hpp
     GUI/PresetComboBoxes.cpp
     GUI/BitmapComboBox.hpp
     GUI/BitmapComboBox.cpp
+    GUI/EditGCodeDialog.hpp
+    GUI/EditGCodeDialog.cpp
     GUI/SavePresetDialog.hpp
     GUI/SavePresetDialog.cpp
     GUI/PhysicalPrinterDialog.hpp
@@ -135,6 +178,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/CoordAxes.hpp
     GUI/Camera.cpp
     GUI/Camera.hpp
+    GUI/CameraUtils.cpp
+    GUI/CameraUtils.hpp
     GUI/wxExtensions.cpp
     GUI/wxExtensions.hpp
     GUI/ExtruderSequenceDialog.cpp
@@ -147,12 +192,18 @@ set(SLIC3R_GUI_SOURCES
     GUI/RemovableDriveManager.hpp
     GUI/SendSystemInfoDialog.cpp
     GUI/SendSystemInfoDialog.hpp
+    GUI/SurfaceDrag.cpp
+    GUI/SurfaceDrag.hpp
+    GUI/TextLines.cpp
+    GUI/TextLines.hpp
     GUI/BonjourDialog.cpp
     GUI/BonjourDialog.hpp
     GUI/ButtonsDescription.cpp
     GUI/ButtonsDescription.hpp
     GUI/ImGuiWrapper.hpp
     GUI/ImGuiWrapper.cpp
+    GUI/ImGuiPureWrap.hpp
+    GUI/ImGuiPureWrap.cpp
     Config/Snapshot.cpp
     Config/Snapshot.hpp
     Config/Version.cpp
@@ -164,6 +215,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ConfigWizard.cpp
     GUI/ConfigWizard.hpp
     GUI/ConfigWizard_private.hpp
+    GUI/ConfigWizardWebViewPage.cpp
+    GUI/ConfigWizardWebViewPage.hpp
     GUI/MsgDialog.cpp
     GUI/MsgDialog.hpp
     GUI/UpdateDialogs.cpp
@@ -172,19 +225,26 @@ set(SLIC3R_GUI_SOURCES
     GUI/FirmwareDialog.hpp
     GUI/PrintHostDialogs.cpp
     GUI/PrintHostDialogs.hpp
+    GUI/WifiConfigDialog.cpp
+    GUI/WifiConfigDialog.hpp
     GUI/Jobs/Job.hpp
     GUI/Jobs/Worker.hpp
     GUI/Jobs/BoostThreadWorker.hpp
     GUI/Jobs/BoostThreadWorker.cpp
     GUI/Jobs/UIThreadWorker.hpp
     GUI/Jobs/BusyCursorJob.hpp
+    GUI/Jobs/CancellableJob.hpp
     GUI/Jobs/PlaterWorker.hpp
-    GUI/Jobs/ArrangeJob.hpp
-    GUI/Jobs/ArrangeJob.cpp
+    GUI/Jobs/ArrangeJob2.hpp
+    GUI/Jobs/ArrangeJob2.cpp
+    GUI/Jobs/CreateFontNameImageJob.cpp
+    GUI/Jobs/CreateFontNameImageJob.hpp
+    GUI/Jobs/CreateFontStyleImagesJob.cpp
+    GUI/Jobs/CreateFontStyleImagesJob.hpp
+    GUI/Jobs/EmbossJob.cpp
+    GUI/Jobs/EmbossJob.hpp
     GUI/Jobs/RotoptimizeJob.hpp
     GUI/Jobs/RotoptimizeJob.cpp
-    GUI/Jobs/FillBedJob.hpp
-    GUI/Jobs/FillBedJob.cpp
     GUI/Jobs/SLAImportJob.hpp
     GUI/Jobs/SLAImportJob.cpp
     GUI/Jobs/ProgressIndicator.hpp
@@ -196,10 +256,22 @@ set(SLIC3R_GUI_SOURCES
     GUI/ProgressStatusBar.cpp
     GUI/Mouse3DController.cpp
     GUI/Mouse3DController.hpp
-    GUI/DoubleSlider.cpp
-    GUI/DoubleSlider.hpp
+    GUI/ImGuiDoubleSlider.cpp
+    GUI/ImGuiDoubleSlider.hpp
+    GUI/TickCodesManager.cpp
+    GUI/TickCodesManager.hpp
+    GUI/DoubleSliderForLayers.cpp
+    GUI/DoubleSliderForLayers.hpp
+    GUI/DoubleSliderForGcode.cpp
+    GUI/DoubleSliderForGcode.hpp
+    GUI/RulerForDoubleSlider.cpp
+    GUI/RulerForDoubleSlider.hpp
     GUI/Notebook.cpp
     GUI/Notebook.hpp
+    GUI/TopBar.cpp
+    GUI/TopBar.hpp
+    GUI/TopBarMenus.cpp
+    GUI/TopBarMenus.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
     GUI/InstanceCheck.cpp
@@ -218,18 +290,57 @@ set(SLIC3R_GUI_SOURCES
     GUI/DesktopIntegrationDialog.hpp
     GUI/HintNotification.cpp
     GUI/HintNotification.hpp
+    GUI/Widgets/BitmapToggleButton.cpp
+    GUI/Widgets/BitmapToggleButton.hpp
+    GUI/Widgets/Button.cpp
+    GUI/Widgets/Button.hpp
+    GUI/Widgets/CheckBox.cpp
+    GUI/Widgets/CheckBox.hpp
+    GUI/Widgets/ComboBox.cpp
+    GUI/Widgets/ComboBox.hpp
+    GUI/Widgets/DropDown.cpp
+    GUI/Widgets/DropDown.hpp
+    GUI/Widgets/StateColor.cpp
+    GUI/Widgets/StateColor.hpp
+    GUI/Widgets/StateHandler.cpp
+    GUI/Widgets/StateHandler.hpp
+    GUI/Widgets/StaticBox.cpp
+    GUI/Widgets/StaticBox.hpp
+    GUI/Widgets/SpinInput.cpp
+    GUI/Widgets/SpinInput.hpp
+    GUI/Widgets/SwitchButton.cpp
+    GUI/Widgets/SwitchButton.hpp
+    GUI/Widgets/TextInput.cpp
+    GUI/Widgets/TextInput.hpp
+    GUI/Widgets/UIColors.hpp
+    GUI/FileArchiveDialog.cpp
+    GUI/FileArchiveDialog.hpp
+    GUI/Downloader.cpp
+    GUI/Downloader.hpp
+    GUI/DownloaderFileGet.cpp
+    GUI/DownloaderFileGet.hpp
+    GUI/LoginDialog.cpp
+    GUI/LoginDialog.hpp
+    GUI/PresetArchiveDatabase.cpp
+    GUI/PresetArchiveDatabase.hpp
     Utils/AppUpdater.cpp
     Utils/AppUpdater.hpp
     Utils/Http.cpp
     Utils/Http.hpp
     Utils/FixModelByWin10.cpp
     Utils/FixModelByWin10.hpp
+    Utils/Moonraker.cpp
+    Utils/Moonraker.hpp
     Utils/OctoPrint.cpp
     Utils/OctoPrint.hpp
     Utils/Duet.cpp
     Utils/Duet.hpp
+    Utils/EmbossStyleManager.cpp
+    Utils/EmbossStyleManager.hpp
     Utils/FlashAir.cpp
     Utils/FlashAir.hpp
+    Utils/FontConfigHelp.cpp
+    Utils/FontConfigHelp.hpp
     Utils/AstroBox.cpp
     Utils/AstroBox.hpp
     Utils/Repetier.cpp
@@ -242,7 +353,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/PresetUpdater.hpp
     Utils/Process.cpp
     Utils/Process.hpp
-    Utils/Profile.hpp
+    Utils/RaycastManager.cpp
+    Utils/RaycastManager.hpp
     Utils/UndoRedo.cpp
     Utils/UndoRedo.hpp
     Utils/HexFile.cpp
@@ -253,13 +365,25 @@ set(SLIC3R_GUI_SOURCES
     Utils/MKS.hpp
     Utils/WinRegistry.cpp
     Utils/WinRegistry.hpp
+    Utils/WxFontUtils.cpp
+    Utils/WxFontUtils.hpp
+    Utils/WifiScanner.hpp
+    Utils/WifiScanner.cpp
+    Utils/Secrets.hpp
+    Utils/Secrets.cpp
+    Utils/PrusaConnect.hpp
+    Utils/PrusaConnect.cpp
 )
+
+find_package(NanoSVG REQUIRED)
 
 if (APPLE)
     list(APPEND SLIC3R_GUI_SOURCES
             Utils/RetinaHelperImpl.mm
             Utils/MacDarkMode.mm
             Utils/MacUtils.mm
+            Utils/WifiScannerMac.h
+            Utils/WifiScannerMac.mm
             GUI/RemovableDriveManagerMM.mm
             GUI/RemovableDriveManagerMM.h
             GUI/Mouse3DHandlerMac.mm
@@ -267,6 +391,7 @@ if (APPLE)
             GUI/InstanceCheckMac.h
         )
     FIND_LIBRARY(DISKARBITRATION_LIBRARY DiskArbitration)
+    FIND_LIBRARY(COREWLAN_LIBRARY CoreWLAN)
 endif ()
 
 add_library(libslic3r_gui STATIC ${SLIC3R_GUI_SOURCES})
@@ -279,21 +404,21 @@ endforeach()
 
 encoding_check(libslic3r_gui)
 
-target_link_libraries(libslic3r_gui libslic3r avrdude libcereal imgui GLEW::GLEW OpenGL::GL hidapi libcurl ${wxWidgets_LIBRARIES})
+target_link_libraries(libslic3r_gui libslic3r avrdude libcereal imgui libvgcode GLEW::GLEW OpenGL::GL hidapi libcurl ${wxWidgets_LIBRARIES} NanoSVG::nanosvg NanoSVG::nanosvgrast)
 
 if (MSVC)
     target_link_libraries(libslic3r_gui Setupapi.lib)
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(libslic3r_gui ${DBUS_LIBRARIES}) 
 elseif (APPLE)
-    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY})
+    target_link_libraries(libslic3r_gui ${DISKARBITRATION_LIBRARY} ${COREWLAN_LIBRARY})
 endif()
 
-if (SLIC3R_STATIC)
+#if (SLIC3R_STATIC)
     # FIXME: This was previously exported by wx-config but the wxWidgets
     # cmake build forgets this and the build fails in debug mode (or on raspberry release)
-    target_compile_definitions(libslic3r_gui PUBLIC -DwxDEBUG_LEVEL=0)
-endif()
+#    target_compile_definitions(libslic3r_gui PUBLIC -DwxDEBUG_LEVEL=0)
+#endif()
 
 if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
     add_precompiled_header(libslic3r_gui pchheader.hpp FORCEINCLUDE)
@@ -305,5 +430,8 @@ endif ()
 if (UNIX AND NOT APPLE)
     find_package(GTK${SLIC3R_GTK} REQUIRED)
     target_include_directories(libslic3r_gui PRIVATE ${GTK${SLIC3R_GTK}_INCLUDE_DIRS})
-    target_link_libraries(libslic3r_gui ${GTK${SLIC3R_GTK}_LIBRARIES})
+    target_link_libraries(libslic3r_gui ${GTK${SLIC3R_GTK}_LIBRARIES} fontconfig)
 endif ()
+
+# Add a definition so that we can tell we are compiling slic3r.
+target_compile_definitions(libslic3r_gui PRIVATE SLIC3R_CURRENTLY_COMPILING_GUI_MODULE)

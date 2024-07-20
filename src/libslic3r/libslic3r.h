@@ -1,7 +1,28 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Tomáš Mészáros @tamasmeszaros, Vojtěch Bubník @bubnikv, Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Pavel Mikuš @Godrak, Filip Sykala @Jony01, Lukáš Hejl @hejllukas, Enrico Turri @enricoturri1966, Vojtěch Král @vojtechkral
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2016 Miro Hrončok @hroncok
+///|/ Copyright (c) 2014 Kamil Kwolek
+///|/
+///|/ ported from xs/src/libslic3r/libslic3r.h:
+///|/ Copyright (c) Prusa Research 2016 - 2019 Vojtěch Král @vojtechkral, Vojtěch Bubník @bubnikv, Enrico Turri @enricoturri1966
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2016 Miro Hrončok @hroncok
+///|/ Copyright (c) 2014 Kamil Kwolek
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef _libslic3r_h_
 #define _libslic3r_h_
 
 #include "libslic3r_version.h"
+
+// Profiles for the alpha are stored into the PrusaSlicer-alpha directory to not mix with the current release.
+#define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY
+//#define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY "-alpha"
+//#define SLIC3R_APP_FULL_NAME SLIC3R_APP_KEY "-beta"
+
+
+
 #define GCODEVIEWER_APP_NAME "PrusaSlicer G-code Viewer"
 #define GCODEVIEWER_APP_KEY  "PrusaSlicerGcodeViewer"
 
@@ -21,6 +42,7 @@
 #include <cassert>
 #include <cmath>
 #include <type_traits>
+#include <optional>
 
 #ifdef _WIN32
 // On MSVC, std::deque degenerates to a list of pointers, which defeats its purpose of reducing allocator load and memory fragmentation.
@@ -32,12 +54,13 @@
 #include "Technologies.hpp"
 #include "Semver.hpp"
 
+using coord_t = 
 #if 1
 // Saves around 32% RAM after slicing step, 6.7% after G-code export (tested on PrusaSlicer 2.2.0 final).
-using coord_t = int32_t;
+    int32_t;
 #else
-//FIXME At least FillRectilinear2 and std::boost Voronoi require coord_t to be 32bit.
-typedef int64_t coord_t;
+    //FIXME At least FillRectilinear2 and std::boost Voronoi require coord_t to be 32bit.
+    int64_t;
 #endif
 
 using coordf_t = double;
@@ -104,34 +127,45 @@ enum Axis {
 	NUM_AXES_WITH_UNKNOWN,
 };
 
-template <typename T>
-inline void append(std::vector<T>& dest, const std::vector<T>& src)
+template <typename T, typename Alloc, typename Alloc2>
+inline void append(std::vector<T, Alloc> &dest, const std::vector<T, Alloc2> &src)
 {
     if (dest.empty())
-        dest = src;
+        dest = src; // copy
     else
         dest.insert(dest.end(), src.begin(), src.end());
 }
 
-template <typename T>
-inline void append(std::vector<T>& dest, std::vector<T>&& src)
+template <typename T, typename Alloc>
+inline void append(std::vector<T, Alloc> &dest, std::vector<T, Alloc> &&src)
 {
     if (dest.empty())
         dest = std::move(src);
     else {
-        dest.reserve(dest.size() + src.size());
-        std::move(std::begin(src), std::end(src), std::back_inserter(dest));
+        dest.insert(dest.end(),
+            std::make_move_iterator(src.begin()),
+            std::make_move_iterator(src.end()));
+        // Release memory of the source contour now.
+        src.clear();
+        src.shrink_to_fit();
     }
-    src.clear();
-    src.shrink_to_fit();
+}
+
+template<class T, class... Args> // Arbitrary allocator can be used
+void clear_and_shrink(std::vector<T, Args...>& vec)
+{
+    // shrink_to_fit does not garantee the release of memory nor does it clear()
+    std::vector<T, Args...> tmp;
+    vec.swap(tmp);
+    assert(vec.capacity() == 0);
 }
 
 // Append the source in reverse.
 template <typename T>
 inline void append_reversed(std::vector<T>& dest, const std::vector<T>& src)
 {
-    if (dest.empty())
-        dest = src;
+    if (dest.empty()) 
+        dest = {src.rbegin(), src.rend()};
     else
         dest.insert(dest.end(), src.rbegin(), src.rend());
 }
@@ -141,11 +175,13 @@ template <typename T>
 inline void append_reversed(std::vector<T>& dest, std::vector<T>&& src)
 {
     if (dest.empty())
-        dest = std::move(src);
-    else {
-        dest.reserve(dest.size() + src.size());
-        std::move(std::rbegin(src), std::rend(src), std::back_inserter(dest));
-    }
+        dest = {std::make_move_iterator(src.rbegin),
+                std::make_move_iterator(src.rend)};
+    else
+        dest.insert(dest.end(), 
+            std::make_move_iterator(src.rbegin()),
+            std::make_move_iterator(src.rend()));
+    // Release memory of the source contour now.
     src.clear();
     src.shrink_to_fit();
 }
@@ -253,9 +289,17 @@ constexpr inline T lerp(const T& a, const T& b, Number t)
 }
 
 template <typename Number>
-constexpr inline bool is_approx(Number value, Number test_value)
+constexpr inline bool is_approx(Number value, Number test_value, Number precision = EPSILON)
 {
-    return std::fabs(double(value) - double(test_value)) < double(EPSILON);
+    return std::fabs(double(value) - double(test_value)) < double(precision);
+}
+
+template<typename Number>
+constexpr inline bool is_approx(const std::optional<Number> &value,
+                                const std::optional<Number> &test_value)
+{
+    return (!value.has_value() && !test_value.has_value()) ||
+        (value.has_value() && test_value.has_value() && is_approx<Number>(*value, *test_value));
 }
 
 // A meta-predicate which is true for integers wider than or equal to coord_t
@@ -298,7 +342,8 @@ template<class T, class I, class... Args> // Arbitrary allocator can be used
 IntegerOnly<I, std::vector<T, Args...>> reserve_vector(I capacity)
 {
     std::vector<T, Args...> ret;
-    if (capacity > I(0)) ret.reserve(size_t(capacity));
+    if (capacity > I(0))
+        ret.reserve(size_t(capacity));
 
     return ret;
 }
@@ -306,6 +351,18 @@ IntegerOnly<I, std::vector<T, Args...>> reserve_vector(I capacity)
 // Borrowed from C++20
 template<class T>
 using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
+
+namespace detail_strip_ref_wrappers {
+template<class T> struct StripCVRef_ { using type = remove_cvref_t<T>; };
+template<class T> struct StripCVRef_<std::reference_wrapper<T>>
+{
+    using type = std::remove_cv_t<T>;
+};
+} // namespace detail
+
+// Removes reference wrappers as well
+template<class T> using  StripCVRef =
+    typename detail_strip_ref_wrappers::StripCVRef_<remove_cvref_t<T>>::type;
 
 // A very simple range concept implementation with iterator-like objects.
 // This should be replaced by std::ranges::subrange (C++20)
@@ -326,9 +383,56 @@ public:
     Range(It b, It e) : from(std::move(b)), to(std::move(e)) {}
 
     // Some useful container-like methods...
-    inline size_t size() const { return end() - begin(); }
-    inline bool   empty() const { return size() == 0; }
+    inline size_t size() const { return std::distance(from, to); }
+    inline bool   empty() const { return from == to; }
 };
+
+template<class Cont> auto range(Cont &&cont)
+{
+    return Range{std::begin(cont), std::end(cont)};
+}
+
+template<class Cont> auto crange(Cont &&cont)
+{
+    return Range{std::cbegin(cont), std::cend(cont)};
+}
+
+template<class IntType = int, class = IntegerOnly<IntType, void>>
+class IntIterator {
+    IntType m_val;
+public:
+    using iterator_category = std::bidirectional_iterator_tag;
+    using difference_type   = std::ptrdiff_t;
+    using value_type        = IntType;
+    using pointer           = IntType*;  // or also value_type*
+    using reference         = IntType&;  // or also value_type&
+
+    IntIterator(IntType v): m_val{v} {}
+
+    IntIterator & operator++() { ++m_val; return *this; }
+    IntIterator operator++(int) { auto cpy = *this; ++m_val; return cpy; }
+    IntIterator & operator--() { --m_val; return *this; }
+    IntIterator operator--(int) { auto cpy = *this; --m_val; return cpy; }
+
+    IntType operator*() const { return m_val; }
+    IntType operator->() const { return m_val; }
+
+    bool operator==(const IntIterator& other) const
+    {
+        return m_val == other.m_val;
+    }
+
+    bool operator!=(const IntIterator& other) const
+    {
+        return !(*this == other);
+    }
+};
+
+template<class IntType, class = IntegerOnly<IntType>>
+auto range(IntType from, IntType to)
+{
+    return Range{IntIterator{from}, IntIterator{to}};
+}
 
 template<class T, class = FloatingOnly<T>>
 constexpr T NaN = std::numeric_limits<T>::quiet_NaN();
@@ -336,6 +440,53 @@ constexpr T NaN = std::numeric_limits<T>::quiet_NaN();
 constexpr float NaNf = NaN<float>;
 constexpr double NaNd = NaN<double>;
 
+// Rounding up.
+// 1.5 is rounded to 2
+// 1.49 is rounded to 1
+// 0.5 is rounded to 1,
+// 0.49 is rounded to 0
+// -0.5 is rounded to 0,
+// -0.51 is rounded to -1,
+// -1.5 is rounded to -1.
+// -1.51 is rounded to -2.
+// If input is not a valid float (it is infinity NaN or if it does not fit)
+// the float to int conversion produces a max int on Intel and +-max int on ARM.
+template<typename I>
+inline IntegerOnly<I, I> fast_round_up(double a)
+{
+    // Why does Java Math.round(0.49999999999999994) return 1?
+    // https://stackoverflow.com/questions/9902968/why-does-math-round0-49999999999999994-return-1
+    return a == 0.49999999999999994 ? I(0) : I(floor(a + 0.5));
+}
+
+template<class T> using SamePair = std::pair<T, T>;
+
+// Helper to be used in static_assert.
+template<class T> struct always_false { enum { value = false }; };
+
+// Map a generic function to each argument following the mapping function
+template<class Fn, class...Args>
+Fn for_each_argument(Fn &&fn, Args&&...args)
+{
+    // see https://www.fluentcpp.com/2019/03/05/for_each_arg-applying-a-function-to-each-argument-of-a-function-in-cpp/
+    (fn(std::forward<Args>(args)),...);
+
+    return fn;
+}
+
+// Call fn on each element of the input tuple tup.
+template<class Fn, class Tup>
+Fn for_each_in_tuple(Fn fn, Tup &&tup)
+{
+    auto mpfn = [&fn](auto&...pack) {
+        for_each_argument(fn, pack...);
+    };
+
+    std::apply(mpfn, tup);
+
+    return fn;
+}
+
 } // namespace Slic3r
 
-#endif
+#endif // _libslic3r_h_

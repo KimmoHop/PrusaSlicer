@@ -1,11 +1,16 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Filip Sykala @Jony01, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLGizmoBase_hpp_
 #define slic3r_GLGizmoBase_hpp_
 
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Color.hpp"
 
-#include "slic3r/GUI/I18N.hpp"
 #include "slic3r/GUI/GLModel.hpp"
+#include "slic3r/GUI/MeshUtils.hpp"
+#include "slic3r/GUI/SceneRaycaster.hpp"
 
 #include <cereal/archives/binary.hpp>
 
@@ -37,8 +42,8 @@ public:
     // Starting value for ids to avoid clashing with ids used by GLVolumes
     // (254 is choosen to leave some space for forward compatibility)
     static const unsigned int BASE_ID = 255 * 255 * 254;
+    static const unsigned int GRABBER_ELEMENTS_MAX_COUNT = 7;
 
-#if ENABLE_GIZMO_GRABBER_REFACTOR
     enum class EGrabberExtension
     {
         None = 0,
@@ -49,7 +54,9 @@ public:
         PosZ = 1 << 4,
         NegZ = 1 << 5,
     };
-#endif // ENABLE_GIZMO_GRABBER_REFACTOR
+
+    // Represents NO key(button on keyboard) value
+    static const int NO_SHORTCUT_KEY_VALUE = 0;
 
 protected:
     struct Grabber
@@ -62,34 +69,29 @@ protected:
         bool dragging{ false };
         Vec3d center{ Vec3d::Zero() };
         Vec3d angles{ Vec3d::Zero() };
-#if ENABLE_GL_SHADERS_ATTRIBUTES
         Transform3d matrix{ Transform3d::Identity() };
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
         ColorRGBA color{ ColorRGBA::WHITE() };
-#if ENABLE_GIZMO_GRABBER_REFACTOR
         EGrabberExtension extensions{ EGrabberExtension::None };
-#endif // ENABLE_GIZMO_GRABBER_REFACTOR
+        // the picking id shared by all the elements
+        int picking_id{ -1 };
+        std::array<std::shared_ptr<SceneRaycasterItem>, GRABBER_ELEMENTS_MAX_COUNT> raycasters = { nullptr };
 
         Grabber() = default;
-#if ENABLE_GIZMO_GRABBER_REFACTOR
         ~Grabber();
-#endif // ENABLE_GIZMO_GRABBER_REFACTOR
 
-        void render(bool hover, float size) { render(size, hover ? complementary(color) : color, false); }
-        void render_for_picking(float size) { render(size, color, true); }
+        void render(bool hover, float size) { render(size, hover ? complementary(color) : color); }
 
         float get_half_size(float size) const;
         float get_dragging_half_size(float size) const;
 
-    private:
-        void render(float size, const ColorRGBA& render_color, bool picking);
+        void register_raycasters_for_picking(int id);
+        void unregister_raycasters_for_picking();
 
-#if ENABLE_GIZMO_GRABBER_REFACTOR
-        static GLModel s_cube;
-        static GLModel s_cone;
-#else
-        GLModel m_cube;
-#endif // ENABLE_GIZMO_GRABBER_REFACTOR
+    private:
+        void render(float size, const ColorRGBA& render_color);
+
+        static PickingModel s_cube;
+        static PickingModel s_cone;
     };
 
 public:
@@ -112,17 +114,19 @@ public:
 
 protected:
     GLCanvas3D& m_parent;
+
     int m_group_id; // TODO: remove only for rotate
     EState m_state;
     int m_shortcut_key;
     std::string m_icon_filename;
     unsigned int m_sprite_id;
-    int m_hover_id;
-    bool m_dragging;
+    int m_hover_id{ -1 };
+    bool m_dragging{ false };
     mutable std::vector<Grabber> m_grabbers;
     ImGuiWrapper* m_imgui;
-    bool m_first_input_window_render;
-    CommonGizmosDataPool* m_c;
+    bool m_first_input_window_render{ true };
+    CommonGizmosDataPool* m_c{ nullptr };
+
 public:
     GLGizmoBase(GLCanvas3D& parent,
                 const std::string& icon_filename,
@@ -149,7 +153,7 @@ public:
     virtual bool wants_enter_leave_snapshots() const { return false; }
     virtual std::string get_gizmo_entering_text() const { assert(false); return ""; }
     virtual std::string get_gizmo_leaving_text() const { assert(false); return ""; }
-    virtual std::string get_action_snapshot_name() { return _u8L("Gizmo action"); }
+    virtual std::string get_action_snapshot_name() const;
     void set_common_data_pool(CommonGizmosDataPool* ptr) { m_c = ptr; }
 
     unsigned int get_sprite_id() const { return m_sprite_id; }
@@ -163,7 +167,6 @@ public:
     bool update_items_state();
 
     void render() { on_render(); }
-    void render_for_picking() { on_render_for_picking(); }
     void render_input_window(float x, float y, float bottom_limit);
 
     /// <summary>
@@ -175,7 +178,7 @@ public:
     /// <summary>
     /// Is called when data (Selection) is changed
     /// </summary>
-    virtual void data_changed(){};
+    virtual void data_changed(bool is_serializing){};
 
     /// <summary>
     /// Implement when want to process mouse events in gizmo
@@ -184,6 +187,13 @@ public:
     /// <param name="mouse_event">Keep information about mouse click</param>
     /// <returns>Return True when use the information and don't want to propagate it otherwise False.</returns>
     virtual bool on_mouse(const wxMouseEvent &mouse_event) { return false; }
+
+    void register_raycasters_for_picking()   { register_grabbers_for_picking(); on_register_raycasters_for_picking(); }
+    void unregister_raycasters_for_picking() { unregister_grabbers_for_picking(); on_unregister_raycasters_for_picking(); }
+
+    virtual bool is_in_editing_mode() const { return false; }
+    virtual bool is_selection_rectangle_dragging() const { return false; }
+
 protected:
     virtual bool on_init() = 0;
     virtual void on_load(cereal::BinaryInputArchive& ar) {}
@@ -203,16 +213,16 @@ protected:
     virtual void on_dragging(const UpdateData& data) {}
 
     virtual void on_render() = 0;
-    virtual void on_render_for_picking() = 0;
     virtual void on_render_input_window(float x, float y, float bottom_limit) {}
 
-    // Returns the picking color for the given id, based on the BASE_ID constant
-    // No check is made for clashing with other picking color (i.e. GLVolumes)
-    ColorRGBA picking_color_component(unsigned int id) const;
+    void register_grabbers_for_picking();
+    void unregister_grabbers_for_picking();
+    virtual void on_register_raycasters_for_picking() {}
+    virtual void on_unregister_raycasters_for_picking() {}
 
     void render_grabbers(const BoundingBoxf3& box) const;
     void render_grabbers(float size) const;
-    void render_grabbers_for_picking(const BoundingBoxf3& box) const;
+    void render_grabbers(size_t first, size_t last, float size, bool force_hover) const;
 
     std::string format(float value, unsigned int decimals) const;
 
@@ -228,14 +238,12 @@ protected:
     /// <returns>same as on_mouse</returns>
     bool use_grabbers(const wxMouseEvent &mouse_event);
 
-#if ENABLE_WORLD_COORDINATE
     void do_stop_dragging(bool perform_mouse_cleanup);
-#endif // ENABLE_WORLD_COORDINATE
 
 private:
     // Flag for dirty visible state of Gizmo
     // When True then need new rendering
-    bool m_dirty;
+    bool m_dirty{ false };
 };
 
 } // namespace GUI

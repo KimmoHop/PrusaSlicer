@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Vojtěch Bubník @bubnikv, Enrico Turri @enricoturri1966
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "libslic3r.h"
 #include "Color.hpp"
 
@@ -25,7 +29,7 @@ static void RGBtoHSV(float r, float g, float b, float& h, float& s, float& v)
 			h = 60.0f * (std::fmod(((g - b) / delta), 6.0f));
 		else if (max_comp == g)
 			h = 60.0f * (((b - r) / delta) + 2.0f);
-		else if (max_comp == b)
+		else  // max_comp == b
 			h = 60.0f * (((r - g) / delta) + 4.0f);
 
 		s = (max_comp > 0.0f) ? delta / max_comp : 0.0f;
@@ -218,7 +222,7 @@ ColorRGBA ColorRGBA::operator * (float value) const
 	for (size_t i = 0; i < 3; ++i) {
 		ret.m_data[i] = std::clamp(value * m_data[i], 0.0f, 1.0f);
 	}
-	ret.m_data[3] = this->m_data[3];
+	ret.m_data[3] = m_data[3];
 	return ret;
 }
 

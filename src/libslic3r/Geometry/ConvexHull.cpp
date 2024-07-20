@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2023 Lukáš Matěna @lukasmatena, Pavel Mikuš @Godrak, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "libslic3r.h"
 #include "ConvexHull.hpp"
 #include "BoundingBox.hpp"
@@ -113,6 +117,18 @@ Polygon convex_hull(const ExPolygons &expolygons)
     pp.reserve(sz);
     for (const auto &expoly : expolygons)
         pp.insert(pp.end(), expoly.contour.points.begin(), expoly.contour.points.end());
+    return convex_hull(pp);
+}
+
+Polygon convex_hulll(const Polylines &polylines)
+{
+    Points pp;
+    size_t sz = 0;
+    for (const auto &polyline : polylines)
+        sz += polyline.points.size();
+    pp.reserve(sz);
+    for (const auto &polyline : polylines)
+        pp.insert(pp.end(), polyline.points.begin(), polyline.points.end());
     return convex_hull(pp);
 }
 
@@ -386,7 +402,7 @@ bool inside_convex_polygon(const std::pair<std::vector<Vec2d>, std::vector<Vec2d
         // At min x.
         assert(pt.x() == it_bottom->x());
         assert(pt.x() == it_top->x());
-        assert(it_bottom->y() <= pt.y() <= it_top->y());
+        assert(it_bottom->y() <= pt.y() && pt.y() <= it_top->y());
         return pt.y() >= it_bottom->y() && pt.y() <= it_top->y();
     }
 

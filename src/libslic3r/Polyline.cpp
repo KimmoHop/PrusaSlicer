@@ -1,3 +1,15 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Enrico Turri @enricoturri1966
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2015 Maksim Derbasov @ntfshard
+///|/ Copyright (c) 2014 Petr Ledvina @ledvinap
+///|/
+///|/ ported from lib/Slic3r/Polyline.pm:
+///|/ Copyright (c) Prusa Research 2018 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2014 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2012 Mark Hindess
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "BoundingBox.hpp"
 #include "Polyline.hpp"
 #include "Exception.hpp"
@@ -17,6 +29,14 @@ const Point& Polyline::leftmost_point() const
         	p = &(*it);
     }
     return *p;
+}
+
+double Polyline::length() const
+{
+    double l = 0;
+    for (size_t i = 1; i < this->points.size(); ++ i)
+        l += (this->points[i] - this->points[i - 1]).cast<double>().norm();
+    return l;
 }
 
 Lines Polyline::lines() const
@@ -102,7 +122,7 @@ Points Polyline::equally_spaced_points(double distance) const
 
 void Polyline::simplify(double tolerance)
 {
-    this->points = MultiPoint::_douglas_peucker(this->points, tolerance);
+    this->points = MultiPoint::douglas_peucker(this->points, tolerance);
 }
 
 #if 0
@@ -131,37 +151,39 @@ template void Polyline::simplify_by_visibility<ExPolygonCollection>(const ExPoly
 
 void Polyline::split_at(const Point &point, Polyline* p1, Polyline* p2) const
 {
-    if (this->points.empty()) return;
-    
-    // find the line to split at
-    size_t line_idx = 0;
-    Point p = this->first_point();
-    double min = (p - point).cast<double>().norm();
-    Lines lines = this->lines();
-    for (Lines::const_iterator line = lines.begin(); line != lines.end(); ++line) {
-        Point p_tmp = point.projection_onto(*line);
-        if ((p_tmp - point).cast<double>().norm() < min) {
-	        p = p_tmp;
-	        min = (p - point).cast<double>().norm();
-	        line_idx = line - lines.begin();
+    if (this->size() < 2) {
+        *p1 = *this;
+        p2->clear();
+        return;
+    }
+
+    if (this->points.front() == point) {
+        //FIXME why is p1 NOT empty as in the case above?
+        *p1 = { point };
+        *p2 = *this;
+        return;
+    }
+
+    auto  min_dist2    = std::numeric_limits<double>::max();
+    auto  min_point_it = this->points.cbegin();
+    Point prev         = this->points.front();
+    for (auto it = this->points.cbegin() + 1; it != this->points.cend(); ++ it) {
+        Point proj;
+        if (double d2 = line_alg::distance_to_squared(Line(prev, *it), point, &proj); d2 < min_dist2) {
+	        min_dist2    = d2;
+	        min_point_it = it;
         }
+        prev = *it;
     }
+
+    p1->points.assign(this->points.cbegin(), min_point_it);
+    if (p1->points.back() != point)
+        p1->points.emplace_back(point);
     
-    // create first half
-    p1->points.clear();
-    for (Lines::const_iterator line = lines.begin(); line != lines.begin() + line_idx + 1; ++line)
-        if (line->a != p) 
-            p1->points.push_back(line->a);
-    // we add point instead of p because they might differ because of numerical issues
-    // and caller might want to rely on point belonging to result polylines
-    p1->points.push_back(point);
-    
-    // create second half
-    p2->points.clear();
-    p2->points.push_back(point);
-    for (Lines::const_iterator line = lines.begin() + line_idx; line != lines.end(); ++line) {
-        p2->points.push_back(line->b);
-    }
+    p2->points = { point };
+    if (*min_point_it == point)
+        ++ min_point_it;
+    p2->points.insert(p2->points.end(), min_point_it, this->points.cend());
 }
 
 bool Polyline::is_straight() const
@@ -191,6 +213,33 @@ BoundingBox get_extents(const Polylines &polylines)
     }
     return bb;
 }
+
+// Return True when erase some otherwise False.
+bool remove_same_neighbor(Polyline &polyline) {
+    Points &points = polyline.points;
+    if (points.empty())
+        return false;
+    auto last = std::unique(points.begin(), points.end());
+
+    // no duplicits
+    if (last == points.end())
+        return false;
+
+    points.erase(last, points.end());
+    return true;
+}
+
+bool remove_same_neighbor(Polylines &polylines){
+    if (polylines.empty())
+        return false;
+    bool exist = false;
+    for (Polyline &polyline : polylines)
+        exist |= remove_same_neighbor(polyline);
+    // remove empty polylines
+    polylines.erase(std::remove_if(polylines.begin(), polylines.end(), [](const Polyline &p) { return p.points.size() <= 1; }), polylines.end());
+    return exist;
+}
+
 
 const Point& leftmost_point(const Polylines &polylines)
 {
@@ -223,6 +272,28 @@ bool remove_degenerate(Polylines &polylines)
     return modified;
 }
 
+std::pair<int, Point> foot_pt(const Points &polyline, const Point &pt)
+{
+    if (polyline.size() < 2)
+        return std::make_pair(-1, Point(0, 0));
+
+    auto  d2_min  = std::numeric_limits<double>::max();
+    Point foot_pt_min;
+    Point prev = polyline.front();
+    auto  it = polyline.begin();
+    auto  it_proj = polyline.begin();
+    for (++ it; it != polyline.end(); ++ it) {
+        Point foot_pt;
+        if (double d2 = line_alg::distance_to_squared(Line(prev, *it), pt, &foot_pt); d2 < d2_min) {
+            d2_min      = d2;
+            foot_pt_min = foot_pt;
+            it_proj     = it;
+        }
+        prev = *it;
+    }
+    return std::make_pair(int(it_proj - polyline.begin()) - 1, foot_pt_min);
+}
+
 ThickLines ThickPolyline::thicklines() const
 {
     ThickLines lines;
@@ -232,6 +303,60 @@ ThickLines ThickPolyline::thicklines() const
             lines.emplace_back(this->points[i], this->points[i + 1], this->width[2 * i], this->width[2 * i + 1]);
     }
     return lines;
+}
+
+// Removes the given distance from the end of the ThickPolyline
+void ThickPolyline::clip_end(double distance)
+{
+    if (! this->empty()) {
+        assert(this->width.size() == (this->points.size() - 1) * 2);
+        while (distance > 0) {
+            Vec2d last_point = this->last_point().cast<double>();
+            this->points.pop_back();
+            if (this->points.empty()) {
+                assert(this->width.empty());
+                break;
+            }
+            coordf_t last_width = this->width.back();
+            this->width.pop_back();
+
+            Vec2d    vec            = this->last_point().cast<double>() - last_point;
+            coordf_t width_diff     = this->width.back() - last_width;
+            double   vec_length_sqr = vec.squaredNorm();
+            if (vec_length_sqr > distance * distance) {
+                double t = (distance / std::sqrt(vec_length_sqr));
+                this->points.emplace_back((last_point + vec * t).cast<coord_t>());
+                this->width.emplace_back(last_width + width_diff * t);
+                assert(this->width.size() == (this->points.size() - 1) * 2);
+                return;
+            } else
+                this->width.pop_back();
+
+            distance -= std::sqrt(vec_length_sqr);
+        }
+    }
+    assert(this->points.empty() ? this->width.empty() : this->width.size() == (this->points.size() - 1) * 2);
+}
+
+void ThickPolyline::start_at_index(int index)
+{
+    assert(index >= 0 && index < this->points.size());
+    assert(this->points.front() == this->points.back() && this->width.front() == this->width.back());
+    if (index != 0 && index + 1 != int(this->points.size()) && this->points.front() == this->points.back() && this->width.front() == this->width.back()) {
+        this->points.pop_back();
+        assert(this->points.size() * 2 == this->width.size());
+        std::rotate(this->points.begin(), this->points.begin() + index, this->points.end());
+        std::rotate(this->width.begin(), this->width.begin() + 2 * index, this->width.end());
+        this->points.emplace_back(this->points.front());
+    }
+}
+
+double Polyline3::length() const
+{
+    double l = 0;
+    for (size_t i = 1; i < this->points.size(); ++ i)
+        l += (this->points[i] - this->points[i - 1]).cast<double>().norm();
+    return l;
 }
 
 Lines3 Polyline3::lines() const

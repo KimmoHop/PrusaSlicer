@@ -1,18 +1,28 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Enrico Turri @enricoturri1966, Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01, David Kocík @kocikdav, Tomáš Mészáros @tamasmeszaros, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2022 André Althaus
+///|/ Copyright (c) 2019 John Drake @foxox
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 //#include "stdlib.h"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Layer.hpp"
 #include "GUI_Preview.hpp"
 #include "GUI_App.hpp"
 #include "GUI.hpp"
+#include "GUI_Init.hpp"
 #include "I18N.hpp"
 #include "3DScene.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "OpenGLManager.hpp"
 #include "GLCanvas3D.hpp"
 #include "libslic3r/PresetBundle.hpp"
-#include "DoubleSlider.hpp"
+#include "DoubleSliderForGcode.hpp"
+#include "DoubleSliderForLayers.hpp"
+#include "ExtruderSequenceDialog.hpp"
 #include "Plater.hpp"
 #include "MainFrame.hpp"
+#include "MsgDialog.hpp"
 #include "format.hpp"
 
 #include <wx/listbook.h>
@@ -24,6 +34,7 @@
 #include <wx/combo.h>
 #include <wx/combobox.h>
 #include <wx/checkbox.h>
+#include <wx/colordlg.h>
 
 // this include must follow the wxWidgets ones or it won't compile on Windows -> see http://trac.wxwidgets.org/ticket/2421
 #include "libslic3r/Print.hpp"
@@ -55,7 +66,8 @@ bool View3D::init(wxWindow* parent, Bed3D& bed, Model* model, DynamicPrintConfig
     if (!Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0 /* disable wxTAB_TRAVERSAL */))
         return false;
 
-    m_canvas_widget = OpenGLManager::create_wxglcanvas(*this);
+    const GUI_InitParams* const init_params = wxGetApp().init_params;
+    m_canvas_widget = OpenGLManager::create_wxglcanvas(*this, (init_params != nullptr) ? init_params->opengl_aa : false);
     if (m_canvas_widget == nullptr)
         return false;
 
@@ -63,8 +75,9 @@ bool View3D::init(wxWindow* parent, Bed3D& bed, Model* model, DynamicPrintConfig
     m_canvas->set_context(wxGetApp().init_glcontext(*m_canvas_widget));
 
     m_canvas->allow_multisample(OpenGLManager::can_multisample());
-    // XXX: If have OpenGL
+
     m_canvas->enable_picking(true);
+    m_canvas->get_selection().set_mode(Selection::Instance);
     m_canvas->enable_moving(true);
     // XXX: more config from 3D.pm
     m_canvas->set_model(model);
@@ -180,6 +193,12 @@ Preview::Preview(
         load_print();
 }
 
+void Preview::set_layers_slider_values_range(int bottom, int top)
+{
+    m_layers_slider->SetSelectionSpan(std::min(top, m_layers_slider->GetMaxPos()),
+                                      std::max(bottom, m_layers_slider->GetMinPos()));
+}
+
 bool Preview::init(wxWindow* parent, Bed3D& bed, Model* model)
 {
     if (!Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, 0 /* disable wxTAB_TRAVERSAL */))
@@ -192,7 +211,8 @@ bool Preview::init(wxWindow* parent, Bed3D& bed, Model* model)
     SetBackgroundColour(GetParent()->GetBackgroundColour());
 #endif // _WIN32 
 
-    m_canvas_widget = OpenGLManager::create_wxglcanvas(*this);
+    const GUI_InitParams* const init_params = wxGetApp().init_params;
+    m_canvas_widget = OpenGLManager::create_wxglcanvas(*this, (init_params != nullptr) ? init_params->opengl_aa : false);
     if (m_canvas_widget == nullptr)
         return false;
 
@@ -202,114 +222,16 @@ bool Preview::init(wxWindow* parent, Bed3D& bed, Model* model)
     m_canvas->set_config(m_config);
     m_canvas->set_model(model);
     m_canvas->set_process(m_process);
-    m_canvas->enable_legend_texture(true);
+    m_canvas->show_legend(true);
     m_canvas->enable_dynamic_background(true);
 
-    m_layers_slider_sizer = create_layers_slider_sizer();
-
-    wxGetApp().UpdateDarkUI(m_bottom_toolbar_panel = new wxPanel(this));
-#if !ENABLE_PREVIEW_LAYOUT
-    m_label_view_type = new wxStaticText(m_bottom_toolbar_panel, wxID_ANY, _L("View"));
-#ifdef _WIN32
-    wxGetApp().UpdateDarkUI(m_choice_view_type = new BitmapComboBox(m_bottom_toolbar_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, NULL, wxCB_READONLY));
-#else
-    m_choice_view_type = new wxComboBox(m_bottom_toolbar_panel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, NULL, wxCB_READONLY);
-#endif
-    m_choice_view_type->Append(_L("Feature type"));
-    m_choice_view_type->Append(_L("Height"));
-    m_choice_view_type->Append(_L("Width"));
-    m_choice_view_type->Append(_L("Speed"));
-    m_choice_view_type->Append(_L("Fan speed"));
-    m_choice_view_type->Append(_L("Temperature"));
-    m_choice_view_type->Append(_L("Volumetric flow rate"));
-#if ENABLE_PREVIEW_LAYER_TIME
-    m_choice_view_type->Append(_L("Layer time (linear)"));
-    m_choice_view_type->Append(_L("Layer time (logarithmic)"));
-#endif // ENABLE_PREVIEW_LAYER_TIME
-    m_choice_view_type->Append(_L("Tool"));
-    m_choice_view_type->Append(_L("Color Print"));
-    m_choice_view_type->SetSelection(0);
-
-    m_label_show = new wxStaticText(m_bottom_toolbar_panel, wxID_ANY, _L("Show"));
-
-#ifdef _WIN32
-    long combo_style = wxCB_READONLY | wxBORDER_SIMPLE; //set border allows use default color instead of theme color wich is allways light under MSW
-#else
-    long combo_style = wxCB_READONLY;
-#endif
-
-    m_combochecklist_features = new wxComboCtrl();
-    m_combochecklist_features->Create(m_bottom_toolbar_panel, wxID_ANY, _L("Feature types"), wxDefaultPosition, wxDefaultSize, combo_style);
-    std::string feature_items = GUI::into_u8(
-        _L("Unknown") + "|1|" +
-        _L("Perimeter") + "|1|" +
-        _L("External perimeter") + "|1|" +
-        _L("Overhang perimeter") + "|1|" +
-        _L("Internal infill") + "|1|" +
-        _L("Solid infill") + "|1|" +
-        _L("Top solid infill") + "|1|" +
-        _L("Ironing") + "|1|" +
-        _L("Bridge infill") + "|1|" +
-        _L("Gap fill") + "|1|" +
-        _L("Skirt/Brim") + "|1|" +
-        _L("Support material") + "|1|" +
-        _L("Support material interface") + "|1|" +
-        _L("Wipe tower") + "|1|" +
-        _L("Custom") + "|1"
-    );
-    Slic3r::GUI::create_combochecklist(m_combochecklist_features, GUI::into_u8(_L("Feature types")), feature_items);
-
-    m_combochecklist_options = new wxComboCtrl();
-    m_combochecklist_options->Create(m_bottom_toolbar_panel, wxID_ANY, _L("Options"), wxDefaultPosition, wxDefaultSize, combo_style);
-    std::string options_items = GUI::into_u8(
-        get_option_type_string(OptionType::Travel) + "|0|" +
-        get_option_type_string(OptionType::Wipe) + "|0|" +
-        get_option_type_string(OptionType::Retractions) + "|0|" +
-        get_option_type_string(OptionType::Unretractions) + "|0|" +
-        get_option_type_string(OptionType::Seams) + "|0|" +
-        get_option_type_string(OptionType::ToolChanges) + "|0|" +
-        get_option_type_string(OptionType::ColorChanges) + "|0|" +
-        get_option_type_string(OptionType::PausePrints) + "|0|" +
-        get_option_type_string(OptionType::CustomGCodes) + "|0|" +
-        get_option_type_string(OptionType::Shells) + "|0|" +
-        get_option_type_string(OptionType::ToolMarker) + "|1|" +
-        get_option_type_string(OptionType::Legend) + "|1"
-    );
-    Slic3r::GUI::create_combochecklist(m_combochecklist_options, GUI::into_u8(_L("Options")), options_items);
-#endif // !ENABLE_PREVIEW_LAYOUT
+    create_sliders();
 
     m_left_sizer = new wxBoxSizer(wxVERTICAL);
     m_left_sizer->Add(m_canvas_widget, 1, wxALL | wxEXPAND, 0);
 
-    wxBoxSizer* right_sizer = new wxBoxSizer(wxVERTICAL);
-    right_sizer->Add(m_layers_slider_sizer, 1, wxEXPAND, 0);
-
-    m_moves_slider = new DoubleSlider::Control(m_bottom_toolbar_panel, wxID_ANY, 0, 0, 0, 100, wxDefaultPosition, wxDefaultSize, wxSL_HORIZONTAL);
-    m_moves_slider->SetDrawMode(DoubleSlider::dmSequentialGCodeView);
-
-    wxBoxSizer* bottom_toolbar_sizer = new wxBoxSizer(wxHORIZONTAL);
-#if !ENABLE_PREVIEW_LAYOUT
-    bottom_toolbar_sizer->AddSpacer(5);
-    bottom_toolbar_sizer->Add(m_label_view_type, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-    bottom_toolbar_sizer->Add(m_choice_view_type, 0, wxALIGN_CENTER_VERTICAL, 0);
-    bottom_toolbar_sizer->AddSpacer(5);
-    bottom_toolbar_sizer->Add(m_label_show, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 5);
-    bottom_toolbar_sizer->Add(m_combochecklist_options, 0, wxALIGN_CENTER_VERTICAL, 0);
-    // change the following number if editing the layout of the bottom toolbar sizer. It is used into update_bottom_toolbar()
-    m_combochecklist_features_pos = 6;
-    bottom_toolbar_sizer->Add(m_combochecklist_features, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
-    bottom_toolbar_sizer->Hide(m_combochecklist_features);
-    bottom_toolbar_sizer->AddSpacer(5);
-#endif // !ENABLE_PREVIEW_LAYOUT
-    bottom_toolbar_sizer->Add(m_moves_slider, 1, wxALL | wxEXPAND, 0);
-    m_bottom_toolbar_panel->SetSizer(bottom_toolbar_sizer);
-
-    m_left_sizer->Add(m_bottom_toolbar_panel, 0, wxALL | wxEXPAND, 0);
-    m_left_sizer->Hide(m_bottom_toolbar_panel);
-
     wxBoxSizer* main_sizer = new wxBoxSizer(wxHORIZONTAL);
     main_sizer->Add(m_left_sizer, 1, wxALL | wxEXPAND, 0);
-    main_sizer->Add(right_sizer, 0, wxALL | wxEXPAND, 0);
 
     SetSizer(main_sizer);
     SetMinSize(GetSize());
@@ -354,6 +276,11 @@ void Preview::set_drop_target(wxDropTarget* target)
         SetDropTarget(target);
 }
 
+void Preview::load_gcode_shells()
+{
+    m_canvas->load_gcode_shells();
+}
+
 void Preview::load_print(bool keep_z_range)
 {
     PrinterTechnology tech = m_process->current_printer_technology();
@@ -362,241 +289,258 @@ void Preview::load_print(bool keep_z_range)
     else if (tech == ptSLA)
         load_print_as_sla();
 
-#if !ENABLE_PREVIEW_LAYOUT
-    update_bottom_toolbar();
-#endif // !ENABLE_PREVIEW_LAYOUT
     Layout();
 }
 
-void Preview::reload_print(bool keep_volumes)
+void Preview::reload_print()
 {
-#ifdef __linux__
-    // We are getting mysterious crashes on Linux in gtk due to OpenGL context activation GH #1874 #1955.
-    // So we are applying a workaround here: a delayed release of OpenGL vertex buffers.
     if (!IsShown())
-    {
-        m_volumes_cleanup_required = !keep_volumes;
         return;
-    }
-#endif /* __linux__ */
-    if (
-#ifdef __linux__
-        m_volumes_cleanup_required || 
-#endif /* __linux__ */
-        !keep_volumes)
-    {
-        m_canvas->reset_volumes();
-        m_loaded = false;
-#ifdef __linux__
-        m_volumes_cleanup_required = false;
-#endif /* __linux__ */
-    }
 
-    load_print();
-}
-
-void Preview::refresh_print()
-{
     m_loaded = false;
-
-    if (!IsShown())
-        return;
-
-    load_print(true);
+    load_print();
 }
 
 void Preview::msw_rescale()
 {
-#if !ENABLE_PREVIEW_LAYOUT
-#ifdef _WIN32
-    m_choice_view_type->Rescale();
-    m_choice_view_type->SetMinSize(m_choice_view_type->GetSize());
-#endif
-#endif // !ENABLE_PREVIEW_LAYOUT
-    // rescale slider
-    if (m_layers_slider != nullptr) m_layers_slider->msw_rescale();
-    if (m_moves_slider != nullptr) m_moves_slider->msw_rescale();
-
+    m_layers_slider->SetEmUnit(wxGetApp().em_unit());
+    m_moves_slider->SetEmUnit(wxGetApp().em_unit());
     // rescale warning legend on the canvas
     get_canvas3d()->msw_rescale();
 
     // rescale legend
-    refresh_print();
+    reload_print();
 }
 
-void Preview::sys_color_changed()
+void Preview::render_sliders(GLCanvas3D& canvas)
 {
-#ifdef _WIN32
-    wxWindowUpdateLocker noUpdates(this);
+    const Size  cnv_size        = canvas.get_canvas_size();
+    const int   canvas_width    = cnv_size.get_width();
+    const int   canvas_height   = cnv_size.get_height();
+    const float extra_scale     = cnv_size.get_scale_factor();
 
-    wxGetApp().UpdateAllStaticTextDarkUI(m_bottom_toolbar_panel);
-#if !ENABLE_PREVIEW_LAYOUT
-    wxGetApp().UpdateDarkUI(m_choice_view_type);
-    wxGetApp().UpdateDarkUI(m_combochecklist_features);
-    wxGetApp().UpdateDarkUI(static_cast<wxCheckListBoxComboPopup*>(m_combochecklist_features->GetPopupControl()));
-    wxGetApp().UpdateDarkUI(m_combochecklist_options);
-    wxGetApp().UpdateDarkUI(static_cast<wxCheckListBoxComboPopup*>(m_combochecklist_options->GetPopupControl()));
-#endif // !ENABLE_PREVIEW_LAYOUT
-#endif
+    GLToolbar& collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
+#if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
+    // When the application is run as GCodeViewer the collapse toolbar is enabled but invisible, as it is renderer
+    // outside of the screen
+    const bool  is_collapse_btn_shown = wxGetApp().is_editor() ? collapse_toolbar.is_enabled() : false;
+#else
+    const bool  is_collapse_btn_shown = collapse_toolbar.is_enabled();
+#endif // ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
 
-    if (m_layers_slider != nullptr)
-        m_layers_slider->sys_color_changed();
+    if (m_layers_slider)
+        m_layers_slider->Render(canvas_width, canvas_height, extra_scale, is_collapse_btn_shown ? collapse_toolbar.get_height() : 0.f);
+    if (m_moves_slider)
+        m_moves_slider->Render(canvas_width, canvas_height, extra_scale);
 }
 
-void Preview::jump_layers_slider(wxKeyEvent& evt)
+float Preview::get_moves_slider_height() const
 {
-    if (m_layers_slider) m_layers_slider->OnChar(evt);
+    if (m_moves_slider && m_moves_slider->IsShown())
+        return m_moves_slider->GetHeight();
+    return 0.0f;
 }
 
-void Preview::move_layers_slider(wxKeyEvent& evt)
+float Preview::get_layers_slider_width() const
 {
-    if (m_layers_slider != nullptr) m_layers_slider->OnKeyDown(evt);
-}
-
-void Preview::edit_layers_slider(wxKeyEvent& evt)
-{
-    if (m_layers_slider != nullptr) m_layers_slider->OnChar(evt);
+    if (m_layers_slider && m_layers_slider->IsShown())
+        return m_layers_slider->GetWidth();
+    return 0.0f;
 }
 
 void Preview::bind_event_handlers()
 {
     Bind(wxEVT_SIZE, &Preview::on_size, this);
-#if !ENABLE_PREVIEW_LAYOUT
-    m_choice_view_type->Bind(wxEVT_COMBOBOX, &Preview::on_choice_view_type, this);
-    m_combochecklist_features->Bind(wxEVT_CHECKLISTBOX, &Preview::on_combochecklist_features, this);
-    m_combochecklist_options->Bind(wxEVT_CHECKLISTBOX, &Preview::on_combochecklist_options, this);
-#endif // !ENABLE_PREVIEW_LAYOUT
-    m_moves_slider->Bind(wxEVT_SCROLL_CHANGED, &Preview::on_moves_slider_scroll_changed, this);
 }
 
 void Preview::unbind_event_handlers()
 {
     Unbind(wxEVT_SIZE, &Preview::on_size, this);
-#if !ENABLE_PREVIEW_LAYOUT
-    m_choice_view_type->Unbind(wxEVT_COMBOBOX, &Preview::on_choice_view_type, this);
-    m_combochecklist_features->Unbind(wxEVT_CHECKLISTBOX, &Preview::on_combochecklist_features, this);
-    m_combochecklist_options->Unbind(wxEVT_CHECKLISTBOX, &Preview::on_combochecklist_options, this);
-#endif // !ENABLE_PREVIEW_LAYOUT
-    m_moves_slider->Unbind(wxEVT_SCROLL_CHANGED, &Preview::on_moves_slider_scroll_changed, this);
-}
-
-void Preview::move_moves_slider(wxKeyEvent& evt)
-{
-    if (m_moves_slider != nullptr) m_moves_slider->OnKeyDown(evt);
 }
 
 void Preview::hide_layers_slider()
 {
-    m_layers_slider_sizer->Hide((size_t)0);
-    Layout();
+    m_layers_slider->Hide();
 }
 
 void Preview::on_size(wxSizeEvent& evt)
 {
     evt.Skip();
+    m_layers_slider->force_ruler_update();
     Refresh();
 }
 
-#if !ENABLE_PREVIEW_LAYOUT
-void Preview::on_choice_view_type(wxCommandEvent& evt)
+/* To avoid get an empty string from wxTextEntryDialog
+ * Let disable OK button, if TextCtrl is empty
+ * */
+static void upgrade_text_entry_dialog(wxTextEntryDialog* dlg, double min = -1.0, double max = -1.0)
 {
-    int selection = m_choice_view_type->GetCurrentSelection();
-    if (0 <= selection && selection < static_cast<int>(GCodeViewer::EViewType::Count)) {
-        m_canvas->set_toolpath_view_type(static_cast<GCodeViewer::EViewType>(selection));
-        m_keep_current_preview_type = true;
-    }
-    refresh_print();
-}
+    GUI::wxGetApp().UpdateDlgDarkUI(dlg);
 
-void Preview::on_combochecklist_features(wxCommandEvent& evt)
-{
-    unsigned int flags = Slic3r::GUI::combochecklist_get_flags(m_combochecklist_features);
-    m_canvas->set_toolpath_role_visibility_flags(flags);
-    refresh_print();
-}
+    // detect TextCtrl and OK button
+    wxWindowList& dlg_items = dlg->GetChildren();
+    for (auto item : dlg_items) {
+        if (wxTextCtrl* textctrl = dynamic_cast<wxTextCtrl*>(item)) {
+            textctrl->SetInsertionPointEnd();
 
-void Preview::on_combochecklist_options(wxCommandEvent& evt)
-{
-    const unsigned int curr_flags = m_canvas->get_gcode_options_visibility_flags();
-    const unsigned int new_flags = Slic3r::GUI::combochecklist_get_flags(m_combochecklist_options);
-    if (curr_flags == new_flags)
-        return;
+            wxButton* btn_OK = static_cast<wxButton*>(dlg->FindWindowById(wxID_OK));
+            btn_OK->Bind(wxEVT_UPDATE_UI, [textctrl](wxUpdateUIEvent& evt) {
+                evt.Enable(!textctrl->IsEmpty());
+            }, btn_OK->GetId());
 
-    m_canvas->set_gcode_options_visibility_from_flags(new_flags);
-    if (m_canvas->get_gcode_view_type() == GCodeViewer::EViewType::Feedrate) {
-        const unsigned int diff_flags = curr_flags ^ new_flags;
-        if ((diff_flags & (1 << static_cast<unsigned int>(Preview::OptionType::Travel))) != 0)
-            refresh_print();
-        else
-            m_canvas->refresh_gcode_preview_render_paths();
-    }
-    else
-        m_canvas->refresh_gcode_preview_render_paths();
-
-    update_moves_slider();
-}
-
-void Preview::update_bottom_toolbar()
-{
-    combochecklist_set_flags(m_combochecklist_features, m_canvas->get_toolpath_role_visibility_flags());
-    combochecklist_set_flags(m_combochecklist_options, m_canvas->get_gcode_options_visibility_flags());
-
-    // updates visibility of features combobox
-    if (m_bottom_toolbar_panel->IsShown()) {
-        wxSizer* sizer = m_bottom_toolbar_panel->GetSizer();
-        bool show = !m_canvas->is_gcode_legend_enabled() || m_canvas->get_gcode_view_type() != GCodeViewer::EViewType::FeatureType;
-
-        if (show) {
-            if (sizer->GetItem(m_combochecklist_features) == nullptr) {
-                sizer->Insert(m_combochecklist_features_pos, m_combochecklist_features, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
-                sizer->Show(m_combochecklist_features);
-                sizer->Layout();
-                Refresh();
-            }
+            break;
         }
-        else {
-            if (sizer->GetItem(m_combochecklist_features) != nullptr) {
-                sizer->Hide(m_combochecklist_features);
-                sizer->Detach(m_combochecklist_features);
-                sizer->Layout();
-                Refresh();
-            }
-        }
-    }
+    }   
 }
-#endif // !ENABLE_PREVIEW_LAYOUT
 
-wxBoxSizer* Preview::create_layers_slider_sizer()
+void Preview::create_sliders()
 {
-    wxBoxSizer* sizer = new wxBoxSizer(wxHORIZONTAL);
-    m_layers_slider = new DoubleSlider::Control(this, wxID_ANY, 0, 0, 0, 100);
+    // Layers Slider
+
+    m_layers_slider = std::make_unique<DoubleSlider::DSForLayers>(0, 0, 0, 100, wxGetApp().is_editor());
+    m_layers_slider->SetEmUnit(wxGetApp().em_unit());
+    m_layers_slider->set_imgui_wrapper(wxGetApp().imgui());
+    m_layers_slider->show_estimated_times(wxGetApp().app_config->get_bool("show_estimated_times_in_dbl_slider"));
+    m_layers_slider->show_ruler(wxGetApp().app_config->get_bool("show_ruler_in_dbl_slider"), wxGetApp().app_config->get_bool("show_ruler_bg_in_dbl_slider"));
 
     m_layers_slider->SetDrawMode(wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology() == ptSLA,
-        wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_bool("complete_objects"));
-    m_layers_slider->enable_action_icon(wxGetApp().is_editor());
+                                 wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_bool("complete_objects"));
 
-    sizer->Add(m_layers_slider, 0, wxEXPAND, 0);
+    m_layers_slider->set_callback_on_thumb_move( [this]() -> void { Preview::on_layers_slider_scroll_changed(); } );
 
-    // sizer, m_canvas_widget
-    m_canvas_widget->Bind(wxEVT_KEY_DOWN, &Preview::update_layers_slider_from_canvas, this);
-    m_canvas_widget->Bind(wxEVT_KEY_UP, [this](wxKeyEvent& event) {
-        if (event.GetKeyCode() == WXK_SHIFT)
-            m_layers_slider->UseDefaultColors(true);
-        event.Skip();
+    m_layers_slider->set_callback_on_change_app_config([](const std::string& key, const std::string& val)   -> void {
+        wxGetApp().app_config->set(key, val);
+    });
+
+    if (wxGetApp().is_editor()) {
+        m_layers_slider->set_callback_on_ticks_changed([this]()                 -> void {
+            Model& model = wxGetApp().plater()->model();
+            model.custom_gcode_per_print_z = m_layers_slider->GetTicksValues();
+            m_schedule_background_process();
+
+            m_keep_current_preview_type = false;
+            reload_print();
         });
 
-    m_layers_slider->Bind(wxEVT_SCROLL_CHANGED, &Preview::on_layers_slider_scroll_changed, this);
-
-    Bind(DoubleSlider::wxCUSTOMEVT_TICKSCHANGED, [this](wxEvent&) {
-        Model& model = wxGetApp().plater()->model();
-        model.custom_gcode_per_print_z = m_layers_slider->GetTicksValues();
-        m_schedule_background_process();
-
-        m_keep_current_preview_type = false;
-        reload_print(false);
+        m_layers_slider->set_callback_on_check_gcode([this](CustomGCode::Type type) -> void {
+            if (type == ColorChange && m_layers_slider->gcode(ColorChange).empty())
+                GUI::wxGetApp().plater()->get_notification_manager()->push_notification(GUI::NotificationType::EmptyColorChangeCode);
         });
 
-    return sizer;
+        m_layers_slider->set_callback_on_empty_auto_color_change([]()                         -> void {
+            GUI::wxGetApp().plater()->get_notification_manager()->push_notification(GUI::NotificationType::EmptyAutoColorChange);
+        });
+
+        m_layers_slider->set_callback_on_get_extruder_colors([]()               -> std::vector<std::string> {
+            return wxGetApp().plater()->get_extruder_color_strings_from_plater_config();
+        });
+
+        m_layers_slider->set_callback_on_get_print([]()                         -> const Print& {
+            return GUI::wxGetApp().plater()->fff_print();
+        });
+
+        m_layers_slider->set_callback_on_get_custom_code([](const std::string& code_in, double height) -> std::string 
+        {
+            wxString msg_text = _L("Enter custom G-code used on current layer") + ":";
+            wxString msg_header = format_wxstr(_L("Custom G-code on current layer (%1% mm)."), height);
+
+            // get custom gcode
+            wxTextEntryDialog dlg(nullptr, msg_text, msg_header, code_in,
+                wxTextEntryDialogStyle | wxTE_MULTILINE);
+            upgrade_text_entry_dialog(&dlg);
+
+            bool valid = true;
+            std::string value;
+            do {
+                if (dlg.ShowModal() != wxID_OK)
+                    return "";
+
+                value = into_u8(dlg.GetValue());
+                valid = true;// GUI::Tab::validate_custom_gcode("Custom G-code", value); // !ysFIXME validate_custom_gcode
+            } while (!valid);
+            return value;
+        });
+
+        m_layers_slider->set_callback_on_get_pause_print_msg([](const std::string& msg_in, double height) -> std::string
+        {
+            wxString msg_text = _L("Enter short message shown on Printer display when a print is paused") + ":";
+            wxString msg_header = format_wxstr(_L("Message for pause print on current layer (%1% mm)."), height);
+
+            // get custom gcode
+            wxTextEntryDialog dlg(nullptr, msg_text, msg_header, from_u8(msg_in),
+                wxTextEntryDialogStyle);
+            upgrade_text_entry_dialog(&dlg);
+
+            if (dlg.ShowModal() != wxID_OK || dlg.GetValue().IsEmpty())
+                return "";
+
+            return into_u8(dlg.GetValue());
+        });
+
+        m_layers_slider->set_callback_on_get_new_color([](const std::string& color) -> std::string
+        {
+            wxColour clr(color);
+            if (!clr.IsOk())
+                clr = wxColour(0, 0, 0); // Don't set alfa to transparence
+
+            auto data = new wxColourData();
+            data->SetChooseFull(1);
+            data->SetColour(clr);
+
+            wxColourDialog dialog(GUI::wxGetApp().GetTopWindow(), data);
+            dialog.CenterOnParent();
+            if (dialog.ShowModal() == wxID_OK)
+                return dialog.GetColourData().GetColour().GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
+            return "";
+        });
+
+        m_layers_slider->set_callback_on_show_info_msg([this](const std::string& message, int btns_flag) -> int
+        {
+            GUI::MessageDialog msg(this, from_u8(message), _L("Notice"), btns_flag);
+            int ret = msg.ShowModal();
+            return ret == wxID_YES      ? wxYES     :
+                   ret == wxID_NO       ? wxNO      :
+                   ret == wxID_CANCEL   ? wxCANCEL  : -1;
+        });
+
+        m_layers_slider->set_callback_on_show_warning_msg([this](const std::string& message, int btns_flag) -> int
+        {
+            GUI::WarningDialog msg(this, from_u8(message), _L("Warning"), btns_flag);
+            int ret = msg.ShowModal();
+            return ret == wxID_YES      ? wxYES     :
+                   ret == wxID_NO       ? wxNO      :
+                   ret == wxID_CANCEL   ? wxCANCEL  : -1;
+        });
+
+        m_layers_slider->set_callback_on_get_extruders_cnt([]() -> int
+        {
+            return GUI::wxGetApp().extruders_edited_cnt();
+        });
+
+        m_layers_slider->set_callback_on_get_extruders_sequence([](DoubleSlider::ExtrudersSequence& extruders_sequence) -> bool
+        {
+            GUI::ExtruderSequenceDialog dlg(extruders_sequence);
+            if (dlg.ShowModal() != wxID_OK)
+                return false;
+            extruders_sequence = dlg.GetValue();
+            return true;
+        });
+    }
+
+    // Move Gcode Slider
+
+    m_moves_slider = std::make_unique<DoubleSlider::DSForGcode>(0, 0, 0, 100);
+    m_moves_slider->SetEmUnit(wxGetApp().em_unit());
+
+    m_moves_slider->set_callback_on_thumb_move([this]() ->void { on_moves_slider_scroll_changed(); });
+
+    // m_canvas_widget
+    m_canvas_widget->Bind(wxEVT_KEY_DOWN,                    &Preview::update_sliders_from_canvas, this);
+    m_canvas_widget->Bind(EVT_GLCANVAS_SLIDERS_MANIPULATION, &Preview::update_sliders_from_canvas, this);
+
+    // Hide sliders from the very begibing. Visibility will be set later
+    m_layers_slider->Hide();
+    m_moves_slider->Hide();
 }
 
 // Find an index of a value in a sorted vector, which is in <z-eps, z+eps>.
@@ -635,7 +579,7 @@ void Preview::check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_f
     ticks_from_model.erase(std::remove_if(ticks_from_model.begin(), ticks_from_model.end(),
                      [layers_z](CustomGCode::Item val)
         {
-            auto it = std::lower_bound(layers_z.begin(), layers_z.end(), val.print_z - DoubleSlider::epsilon());
+            auto it = std::lower_bound(layers_z.begin(), layers_z.end(), val.print_z - CustomGCode::epsilon());
             return it == layers_z.end();
         }),
         ticks_from_model.end());
@@ -646,18 +590,17 @@ void Preview::check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_f
 void Preview::update_layers_slider(const std::vector<double>& layers_z, bool keep_z_range)
 {
     // Save the initial slider span.
-    double z_low = m_layers_slider->GetLowerValueD();
-    double z_high = m_layers_slider->GetHigherValueD();
-    bool   was_empty = m_layers_slider->GetMaxValue() == 0;
+    double z_low = m_layers_slider->GetLowerValue();
+    double z_high = m_layers_slider->GetHigherValue();
+    bool   was_empty = m_layers_slider->GetMaxPos() == 0;
 
     bool force_sliders_full_range = was_empty;
-    if (!keep_z_range)
-    {
-        bool span_changed = layers_z.empty() || std::abs(layers_z.back() - m_layers_slider->GetMaxValueD()) > DoubleSlider::epsilon()/*1e-6*/;
+    if (!keep_z_range) {
+        bool span_changed = layers_z.empty() || std::abs(layers_z.back() - m_layers_slider->GetMaxValue()) > CustomGCode::epsilon()/*1e-6*/;
         force_sliders_full_range |= span_changed;
     }
-    bool   snap_to_min = force_sliders_full_range || m_layers_slider->is_lower_at_min();
-    bool   snap_to_max = force_sliders_full_range || m_layers_slider->is_higher_at_max();
+    bool   snap_to_min = force_sliders_full_range || m_layers_slider->IsLowerAtMin();
+    bool   snap_to_max = force_sliders_full_range || m_layers_slider->IsHigherAtMax();
 
     // Detect and set manipulation mode for double slider
     update_layers_slider_mode();
@@ -668,26 +611,30 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
         ticks_info_from_model = plater->model().custom_gcode_per_print_z;
     else {
         ticks_info_from_model.mode = CustomGCode::Mode::SingleExtruder;
-        ticks_info_from_model.gcodes = m_canvas->get_custom_gcode_per_print_z();
+        ticks_info_from_model.gcodes = m_gcode_result->custom_gcode_per_print_z;
     }
     check_layers_slider_values(ticks_info_from_model.gcodes, layers_z);
 
     //first of all update extruder colors to avoid crash, when we are switching printer preset from MM to SM
-    m_layers_slider->SetExtruderColors(plater->get_extruder_colors_from_plater_config(wxGetApp().is_editor() ? nullptr : m_gcode_result));
+    m_layers_slider->SetExtruderColors(plater->get_extruder_color_strings_from_plater_config(wxGetApp().is_editor() ? nullptr : m_gcode_result));
     m_layers_slider->SetSliderValues(layers_z);
-    assert(m_layers_slider->GetMinValue() == 0);
-    m_layers_slider->SetMaxValue(layers_z.empty() ? 0 : layers_z.size() - 1);
+    m_layers_slider->force_ruler_update();
+    assert(m_layers_slider->GetMinPos() == 0);
+
+    m_layers_slider->Freeze();
+
+    m_layers_slider->SetMaxPos(layers_z.empty() ? 0 : layers_z.size() - 1);
 
     int idx_low = 0;
-    int idx_high = m_layers_slider->GetMaxValue();
+    int idx_high = m_layers_slider->GetMaxPos();
     if (!layers_z.empty()) {
         if (!snap_to_min) {
-            int idx_new = find_close_layer_idx(layers_z, z_low, DoubleSlider::epsilon()/*1e-6*/);
+            int idx_new = find_close_layer_idx(layers_z, z_low, CustomGCode::epsilon()/*1e-6*/);
             if (idx_new != -1)
                 idx_low = idx_new;
         }
         if (!snap_to_max) {
-            int idx_new = find_close_layer_idx(layers_z, z_high, DoubleSlider::epsilon()/*1e-6*/);
+            int idx_new = find_close_layer_idx(layers_z, z_high, CustomGCode::epsilon()/*1e-6*/);
             if (idx_new != -1)
                 idx_high = idx_new;
         }
@@ -699,14 +646,34 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
     bool sequential_print = wxGetApp().preset_bundle->prints.get_edited_preset().config.opt_bool("complete_objects");
     m_layers_slider->SetDrawMode(sla_print_technology, sequential_print);
     if (sla_print_technology)
-        m_layers_slider->SetLayersTimes(plater->sla_print().print_statistics().layers_times);
-    else {
-        auto print_mode_stat = m_gcode_result->print_statistics.modes.front();
-        m_layers_slider->SetLayersTimes(print_mode_stat.layers_times, print_mode_stat.time);
-    }
+        m_layers_slider->SetLayersTimes(plater->sla_print().print_statistics().layers_times_running_total);
+    else
+        m_layers_slider->SetLayersTimes(m_canvas->get_gcode_layers_times_cache(), m_gcode_result->print_statistics.modes.front().time);
+
+    m_layers_slider->Thaw();
+
+    // check if ticks_info_from_model contains ColorChange g-code
+    bool color_change_already_exists = false;
+    for (const CustomGCode::Item& gcode: ticks_info_from_model.gcodes)
+        if (gcode.type == CustomGCode::Type::ColorChange) {
+            color_change_already_exists = true;
+            break;
+        }
+
+    auto get_print_obj_idxs = [plater]() ->std::string {
+        if (plater->printer_technology() == ptSLA)
+            return "sla";
+        const Print& print = GUI::wxGetApp().plater()->fff_print();
+        std::string idxs;
+        for (auto object : print.objects())
+            idxs += std::to_string(object->id().id) + "_";
+        return idxs;
+    };
 
     // Suggest the auto color change, if model looks like sign
-    if (m_layers_slider->IsNewPrint())
+    if (!color_change_already_exists &&
+        wxGetApp().app_config->get_bool("allow_auto_color_change") &&
+        m_layers_slider->is_new_print(get_print_obj_idxs()))
     {
         const Print& print = wxGetApp().plater()->fff_print();
 
@@ -742,7 +709,7 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
             if (i < min_solid_height)
                 continue;
 
-            if (DoubleSlider::check_color_change(object, i, num_layers, true, [this, object](Layer*) {
+            if (DoubleSlider::check_color_change(object, i, num_layers, true, [this, object](const Layer*) {
                 NotificationManager* notif_mngr = wxGetApp().plater()->get_notification_manager();
                 notif_mngr->push_notification(
                     NotificationType::SignDetected, NotificationManager::NotificationLevel::PrintInfoNotificationLevel,
@@ -761,9 +728,7 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
                 break;
         }
     }
-
-    m_layers_slider_sizer->Show((size_t)0);
-    Layout();
+    m_layers_slider->Show();
 }
 
 void Preview::update_layers_slider_mode()
@@ -798,11 +763,12 @@ void Preview::update_layers_slider_mode()
                         if ((volume->config.has("extruder") && 
                             volume->config.option("extruder")->getInt() != 0 && // extruder isn't default
                             volume->config.option("extruder")->getInt() != extruder) ||
-                            !volume->mmu_segmentation_facets.empty())
+                            !volume->mm_segmentation_facets.empty())
                             return false;
 
                     for (const auto& range : object->layer_config_ranges)
                         if (range.second.has("extruder") &&
+                            range.second.option("extruder")->getInt() != 0 && // extruder isn't default
                             range.second.option("extruder")->getInt() != extruder)
                             return false;
                 }
@@ -821,89 +787,115 @@ void Preview::update_layers_slider_mode()
 
 void Preview::reset_layers_slider()
 {
-    m_layers_slider->SetHigherValue(0);
-    m_layers_slider->SetLowerValue(0);
+    m_layers_slider->SetSelectionSpan(0, 0);
 }
 
-void Preview::update_layers_slider_from_canvas(wxKeyEvent& event)
+void Preview::update_sliders_from_canvas(wxKeyEvent& event)
 {
-    if (event.HasModifiers()) {
+    const auto key = event.GetKeyCode();
+
+    const bool can_edit = wxGetApp().is_editor();
+
+    if (can_edit && (key == WXK_NUMPAD_ADD || key == '+'))
+        m_layers_slider->add_current_tick();
+    else if (can_edit && (key == WXK_NUMPAD_SUBTRACT || key == WXK_DELETE || key == WXK_BACK || key == '-'))
+        m_layers_slider->delete_current_tick();
+    else if (key == 'G' || key == 'g')
+        m_layers_slider->jump_to_value();
+    else if (key == WXK_LEFT || key == WXK_RIGHT || key == WXK_UP || key == WXK_DOWN) {
+        int delta = 1;
+        // accelerators
+        int accelerator = 0;
+        if (wxGetKeyState(WXK_SHIFT))
+            accelerator += 5;
+        if (wxGetKeyState(WXK_CONTROL))
+            accelerator += 5;
+        if (accelerator > 0)
+            delta *= accelerator;
+
+        if (key == WXK_LEFT || key == WXK_RIGHT)
+            m_moves_slider->move_current_thumb(delta * (key == WXK_LEFT ? 1 : -1));
+        else if (key == WXK_UP || key == WXK_DOWN)
+            m_layers_slider->move_current_thumb(delta * (key == WXK_DOWN ? 1 : -1));
+    }
+
+    else if (event.HasModifiers()) {
         event.Skip();
         return;
     }
 
-    const auto key = event.GetKeyCode();
-
-    if (key == 'S' || key == 'W') {
-        const int new_pos = key == 'W' ? m_layers_slider->GetHigherValue() + 1 : m_layers_slider->GetHigherValue() - 1;
-        m_layers_slider->SetHigherValue(new_pos);
-        if (event.ShiftDown() || m_layers_slider->is_one_layer()) m_layers_slider->SetLowerValue(m_layers_slider->GetHigherValue());
+    else if (key == 'S' || key == 'W') {
+        const int new_pos = key == 'W' ? m_layers_slider->GetHigherPos() + 1 : m_layers_slider->GetHigherPos() - 1;
+        m_layers_slider->SetHigherPos(new_pos);
     }
     else if (key == 'A' || key == 'D') {
-        const int new_pos = key == 'D' ? m_moves_slider->GetHigherValue() + 1 : m_moves_slider->GetHigherValue() - 1;
-        m_moves_slider->SetHigherValue(new_pos);
-        if (event.ShiftDown() || m_moves_slider->is_one_layer()) m_moves_slider->SetLowerValue(m_moves_slider->GetHigherValue());
+        const int new_pos = key == 'D' ? m_moves_slider->GetHigherPos() + 1 : m_moves_slider->GetHigherPos() - 1;
+        m_moves_slider->SetHigherPos(new_pos);
     }
     else if (key == 'X')
         m_layers_slider->ChangeOneLayerLock();
-    else if (key == WXK_SHIFT)
-        m_layers_slider->UseDefaultColors(false);
     else
         event.Skip();
 }
 
-void Preview::update_moves_slider()
+void Preview::update_moves_slider(std::optional<int> visible_range_min, std::optional<int> visible_range_max)
 {
-    const GCodeViewer::SequentialView& view = m_canvas->get_gcode_sequential_view();
-    // this should not be needed, but it is here to try to prevent rambling crashes on Mac Asan
-    if (view.endpoints.last < view.endpoints.first)
+    if (m_gcode_result->moves.empty())
         return;
 
-#if ENABLE_PROCESS_G2_G3_LINES
-    assert(view.endpoints.first <= view.current.first && view.current.first <= view.endpoints.last);
-    assert(view.endpoints.first <= view.current.last && view.current.last <= view.endpoints.last);
+    const libvgcode::Interval& range = m_canvas->get_gcode_view_enabled_range();
+    uint32_t last_gcode_id = m_canvas->get_gcode_vertex_at(range[0]).gcode_id;
+    std::optional<uint32_t> gcode_id_min = visible_range_min.has_value() ?
+        std::optional<uint32_t>{ m_canvas->get_gcode_vertex_at(*visible_range_min).gcode_id } : std::nullopt;
+    std::optional<uint32_t> gcode_id_max = visible_range_max.has_value() ?
+        std::optional<uint32_t>{ m_canvas->get_gcode_vertex_at(*visible_range_max).gcode_id } : std::nullopt;
 
-    std::vector<double> values;
-    values.reserve(view.endpoints.last - view.endpoints.first + 1);
-    std::vector<double> alternate_values;
-    alternate_values.reserve(view.endpoints.last - view.endpoints.first + 1);
-    unsigned int last_gcode_id = view.gcode_ids[view.endpoints.first];
-    for (unsigned int i = view.endpoints.first; i <= view.endpoints.last; ++i) {
-        if (i > view.endpoints.first) {
+    const size_t range_size = range[1] - range[0] + 1;
+    std::vector<unsigned int> values;
+    values.reserve(range_size);
+    std::vector<unsigned int> alternate_values;
+    alternate_values.reserve(range_size);
+
+    std::optional<uint32_t> visible_range_min_id;
+    std::optional<uint32_t> visible_range_max_id;
+    uint32_t counter = 0;
+
+    for (size_t i = range[0]; i <= range[1]; ++i) {
+        const uint32_t gcode_id = m_canvas->get_gcode_vertex_at(i).gcode_id;
+        bool skip = false;
+        if (i > range[0]) {
             // skip consecutive moves with same gcode id (resulting from processing G2 and G3 lines)
-            if (last_gcode_id == view.gcode_ids[i]) {
-                values.back() = static_cast<double>(i + 1);
-                alternate_values.back() = static_cast<double>(view.gcode_ids[i]);
-                continue;
+            if (last_gcode_id == gcode_id) {
+                values.back() = i + 1;
+                skip = true;
             }
             else
-                last_gcode_id = view.gcode_ids[i];
+                last_gcode_id = gcode_id;
         }
 
-        values.emplace_back(static_cast<double>(i + 1));
-        alternate_values.emplace_back(static_cast<double>(view.gcode_ids[i]));
+        if (!skip) {
+            values.emplace_back(i + 1);
+            alternate_values.emplace_back(gcode_id);
+            if (gcode_id_min.has_value() && alternate_values.back() == *gcode_id_min)
+                visible_range_min_id = counter;
+            else if (gcode_id_max.has_value() && alternate_values.back() == *gcode_id_max)
+                visible_range_max_id = counter;
+            ++counter;
+        }
     }
+
+    const int span_min_id = visible_range_min_id.has_value() ? *visible_range_min_id : 0;
+    const int span_max_id = visible_range_max_id.has_value() ? *visible_range_max_id : static_cast<int>(values.size()) - 1;
 
     m_moves_slider->SetSliderValues(values);
     m_moves_slider->SetSliderAlternateValues(alternate_values);
-    m_moves_slider->SetMaxValue(int(values.size()) - 1);
-    m_moves_slider->SetSelectionSpan(values.front() - 1 - view.endpoints.first, values.back() - 1 - view.endpoints.first);
-#else
-    std::vector<double> values(view.endpoints.last - view.endpoints.first + 1);
-    std::vector<double> alternate_values(view.endpoints.last - view.endpoints.first + 1);
-    unsigned int count = 0;
-    for (unsigned int i = view.endpoints.first; i <= view.endpoints.last; ++i) {
-        values[count] = static_cast<double>(i + 1);
-        if (view.gcode_ids[i] > 0)
-            alternate_values[count] = static_cast<double>(view.gcode_ids[i]);
-        ++count;
-    }
 
-    m_moves_slider->SetSliderValues(values);
-    m_moves_slider->SetSliderAlternateValues(alternate_values);
-    m_moves_slider->SetMaxValue(view.endpoints.last - view.endpoints.first);
-    m_moves_slider->SetSelectionSpan(view.current.first - view.endpoints.first, view.current.last - view.endpoints.first);
-#endif // ENABLE_PROCESS_G2_G3_LINES
+    m_moves_slider->Freeze();
+    m_moves_slider->SetMaxPos(static_cast<int>(values.size()) - 1);
+    m_moves_slider->SetSelectionSpan(span_min_id, span_max_id);
+    m_moves_slider->Thaw();
+
+    m_moves_slider->ShowLowerThumb(get_app_config()->get("seq_top_layer_only") == "0");
 }
 
 void Preview::enable_moves_slider(bool enable)
@@ -911,7 +903,6 @@ void Preview::enable_moves_slider(bool enable)
     bool render_as_disabled = !enable;
     if (m_moves_slider != nullptr && m_moves_slider->is_rendering_as_disabled() != render_as_disabled) {
         m_moves_slider->set_render_as_disabled(render_as_disabled);
-        m_moves_slider->Refresh();
     }
 }
 
@@ -945,35 +936,24 @@ void Preview::load_print_as_fff(bool keep_z_range)
     }
 
     if (wxGetApp().is_editor() && !has_layers) {
+        m_canvas->reset_gcode_layers_times_cache();
         hide_layers_slider();
-        m_left_sizer->Hide(m_bottom_toolbar_panel);
-        m_left_sizer->Layout();
-        Refresh();
+        m_moves_slider->Hide();
         m_canvas_widget->Refresh();
         return;
     }
 
-    GCodeViewer::EViewType gcode_view_type = m_canvas->get_gcode_view_preview_type();
-    bool gcode_preview_data_valid = !m_gcode_result->moves.empty();
+    libvgcode::EViewType gcode_view_type = m_canvas->get_gcode_view_type();
+    const bool gcode_preview_data_valid = !m_gcode_result->moves.empty();
+    const bool is_pregcode_preview = !gcode_preview_data_valid && wxGetApp().is_editor();
 
-    // Collect colors per extruder.
-    std::vector<std::string> colors;
-    std::vector<CustomGCode::Item> color_print_values = {};
-    // set color print values, if it si selected "ColorPrint" view type
-    if (gcode_view_type == GCodeViewer::EViewType::ColorPrint) {
-        colors = wxGetApp().plater()->get_colors_for_color_print(m_gcode_result);
-
-        if (!gcode_preview_data_valid) {
-            if (wxGetApp().is_editor())
-                color_print_values = wxGetApp().plater()->model().custom_gcode_per_print_z.gcodes;
-            else
-                color_print_values = m_canvas->get_custom_gcode_per_print_z();
-            colors.push_back("#808080"); // gray color for pause print or custom G-code 
-        }
-    }
-    else if (gcode_preview_data_valid || gcode_view_type == GCodeViewer::EViewType::Tool) {
-        colors = wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result);
-        color_print_values.clear();
+    const std::vector<std::string> tool_colors = wxGetApp().plater()->get_extruder_color_strings_from_plater_config(m_gcode_result);
+    const std::vector<CustomGCode::Item>& color_print_values = wxGetApp().is_editor() ?
+        wxGetApp().plater()->model().custom_gcode_per_print_z.gcodes : m_gcode_result->custom_gcode_per_print_z;
+    std::vector<std::string> color_print_colors;
+    if (!color_print_values.empty()) {
+        color_print_colors = wxGetApp().plater()->get_color_strings_for_color_print(m_gcode_result);
+        color_print_colors.push_back("#808080"); // gray color for pause print or custom G-code 
     }
 
     std::vector<double> zs;
@@ -982,67 +962,48 @@ void Preview::load_print_as_fff(bool keep_z_range)
         m_canvas->set_selected_extruder(0);
         if (gcode_preview_data_valid) {
             // Load the real G-code preview.
-            m_canvas->load_gcode_preview(*m_gcode_result, colors);
-            m_left_sizer->Layout();
-            Refresh();
+            m_canvas->load_gcode_preview(*m_gcode_result, tool_colors, color_print_colors);
+            // the view type may have been changed by the call m_canvas->load_gcode_preview()
+            gcode_view_type = m_canvas->get_gcode_view_type();
             zs = m_canvas->get_gcode_layers_zs();
-            if (!zs.empty())
-                m_left_sizer->Show(m_bottom_toolbar_panel);
             m_loaded = true;
         }
-        else if (wxGetApp().is_editor()) {
+        else if (is_pregcode_preview) {
             // Load the initial preview based on slices, not the final G-code.
-            m_canvas->load_preview(colors, color_print_values);
-            m_left_sizer->Hide(m_bottom_toolbar_panel);
-            m_left_sizer->Layout();
-            Refresh();
-            zs = m_canvas->get_volumes_print_zs(true);
+            m_canvas->load_preview(tool_colors, color_print_colors, color_print_values);
+            // the view type has been changed by the call m_canvas->load_gcode_preview()
+            if (gcode_view_type == libvgcode::EViewType::ColorPrint && !color_print_values.empty())
+                m_canvas->set_gcode_view_type(gcode_view_type);
+            zs = m_canvas->get_gcode_layers_zs();
         }
-        else {
-            m_left_sizer->Hide(m_bottom_toolbar_panel);
-            m_left_sizer->Layout();
-            Refresh();
-        }
+        m_moves_slider->Show(gcode_preview_data_valid && !zs.empty());
 
         if (!zs.empty() && !m_keep_current_preview_type) {
-            unsigned int number_extruders = wxGetApp().is_editor() ?
-                (unsigned int)print->extruders().size() :
-                m_canvas->get_gcode_extruders_count();
-            std::vector<Item> gcodes = wxGetApp().is_editor() ?
-                wxGetApp().plater()->model().custom_gcode_per_print_z.gcodes :
-                m_canvas->get_custom_gcode_per_print_z();
-#if ENABLE_PREVIEW_LAYOUT
-            const GCodeViewer::EViewType choice = !gcodes.empty() ?
-                GCodeViewer::EViewType::ColorPrint :
-                (number_extruders > 1) ? GCodeViewer::EViewType::Tool : GCodeViewer::EViewType::FeatureType;
+            const unsigned int number_extruders = wxGetApp().is_editor() ?
+                (unsigned int)print->extruders().size() : m_canvas->get_gcode_extruders_count();
+            const bool contains_color_gcodes = std::any_of(std::begin(color_print_values), std::end(color_print_values),
+                [](auto const& item) { return item.type == CustomGCode::Type::ColorChange || item.type == CustomGCode::Type::ToolChange; });
+            const libvgcode::EViewType choice = contains_color_gcodes ?
+                libvgcode::EViewType::ColorPrint :
+                (number_extruders > 1) ? libvgcode::EViewType::Tool : libvgcode::EViewType::FeatureType;
             if (choice != gcode_view_type) {
-                m_canvas->set_gcode_view_preview_type(choice);
+                const bool gcode_view_type_cache_load = m_canvas->is_gcode_view_type_cache_load_enabled();
+                if (gcode_view_type_cache_load)
+                    m_canvas->enable_gcode_view_type_cache_load(false);
+                m_canvas->set_gcode_view_type(choice);
+                if (gcode_view_type_cache_load)
+                    m_canvas->enable_gcode_view_type_cache_load(true);
                 if (wxGetApp().is_gcode_viewer())
                     m_keep_current_preview_type = true;
-                refresh_print();
             }
-#else
-            const wxString choice = !gcodes.empty() ?
-                _L("Color Print") :
-                (number_extruders > 1) ? _L("Tool") : _L("Feature type");
-            int type = m_choice_view_type->FindString(choice);
-            if (m_choice_view_type->GetSelection() != type) {
-                if (0 <= type && type < static_cast<int>(GCodeViewer::EViewType::Count)) {
-                    m_choice_view_type->SetSelection(type);
-                    m_canvas->set_gcode_view_preview_type(static_cast<GCodeViewer::EViewType>(type));
-                    if (wxGetApp().is_gcode_viewer())
-                        m_keep_current_preview_type = true;
-                    refresh_print();
-                }
-            }
-#endif // ENABLE_PREVIEW_LAYOUT
         }
 
         if (zs.empty()) {
             // all layers filtered out
             hide_layers_slider();
             m_canvas_widget->Refresh();
-        } else
+        }
+        else
             update_layers_slider(zs, keep_z_range);
     }
 }
@@ -1076,9 +1037,7 @@ void Preview::load_print_as_sla()
 
     if (IsShown()) {
         m_canvas->load_sla_preview();
-        m_left_sizer->Hide(m_bottom_toolbar_panel);
-        m_left_sizer->Layout();
-        Refresh();
+        m_moves_slider->Hide();
 
         if (n_layers > 0)
             update_layers_slider(zs);
@@ -1087,50 +1046,30 @@ void Preview::load_print_as_sla()
     }
 }
 
-void Preview::on_layers_slider_scroll_changed(wxCommandEvent& event)
+void Preview::on_layers_slider_scroll_changed()
 {
     if (IsShown()) {
         PrinterTechnology tech = m_process->current_printer_technology();
         if (tech == ptFFF) {
-            m_canvas->set_volumes_z_range({ m_layers_slider->GetLowerValueD(), m_layers_slider->GetHigherValueD() });
-            m_canvas->set_toolpaths_z_range({ static_cast<unsigned int>(m_layers_slider->GetLowerValue()), static_cast<unsigned int>(m_layers_slider->GetHigherValue()) });
+            m_canvas->set_volumes_z_range({ m_layers_slider->GetLowerValue(), m_layers_slider->GetHigherValue() });
+            m_canvas->set_toolpaths_z_range({ static_cast<unsigned int>(m_layers_slider->GetLowerPos()), static_cast<unsigned int>(m_layers_slider->GetHigherPos()) });
             m_canvas->set_as_dirty();
         }
         else if (tech == ptSLA) {
-            m_canvas->set_clipping_plane(0, ClippingPlane(Vec3d::UnitZ(), -m_layers_slider->GetLowerValueD()));
-            m_canvas->set_clipping_plane(1, ClippingPlane(-Vec3d::UnitZ(), m_layers_slider->GetHigherValueD()));
+            m_canvas->set_clipping_plane(0, ClippingPlane(Vec3d::UnitZ(), -m_layers_slider->GetLowerValue()));
+            m_canvas->set_clipping_plane(1, ClippingPlane(-Vec3d::UnitZ(), m_layers_slider->GetHigherValue()));
+            m_canvas->set_layer_slider_index(m_layers_slider->GetHigherPos());
             m_canvas->render();
         }
     }
 }
 
-void Preview::on_moves_slider_scroll_changed(wxCommandEvent& event)
+void Preview::on_moves_slider_scroll_changed()
 {
-    m_canvas->update_gcode_sequential_view_current(static_cast<unsigned int>(m_moves_slider->GetLowerValueD() - 1.0), static_cast<unsigned int>(m_moves_slider->GetHigherValueD() - 1.0));
-    m_canvas->render();
+    m_canvas->update_gcode_sequential_view_current(static_cast<unsigned int>(m_moves_slider->GetLowerValue() - 1), static_cast<unsigned int>(m_moves_slider->GetHigherValue() - 1));
+    m_canvas->set_as_dirty();
+    m_canvas->request_extra_frame();
 }
-
-#if !ENABLE_PREVIEW_LAYOUT
-wxString Preview::get_option_type_string(OptionType type) const
-{
-    switch (type)
-    {
-    case OptionType::Travel:        { return _L("Travel"); }
-    case OptionType::Wipe:          { return _L("Wipe"); }
-    case OptionType::Retractions:   { return _L("Retractions"); }
-    case OptionType::Unretractions: { return _L("Deretractions"); }
-    case OptionType::Seams:         { return _L("Seams"); }
-    case OptionType::ToolChanges:   { return _L("Tool changes"); }
-    case OptionType::ColorChanges:  { return _L("Color changes"); }
-    case OptionType::PausePrints:   { return _L("Print pauses"); }
-    case OptionType::CustomGCodes:  { return _L("Custom G-codes"); }
-    case OptionType::Shells:        { return _L("Shells"); }
-    case OptionType::ToolMarker:    { return _L("Tool marker"); }
-    case OptionType::Legend:        { return _L("Legend/Estimated printing time"); }
-    default:                        { return ""; }
-    }
-}
-#endif // !ENABLE_PREVIEW_LAYOUT
 
 } // namespace GUI
 } // namespace Slic3r

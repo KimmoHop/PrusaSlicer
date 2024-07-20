@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Tomáš Mészáros @tamasmeszaros, Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2018 Colin Gilgenbach @hexane360
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "PostProcessor.hpp"
 
 #include "libslic3r/Utils.hpp"
@@ -8,15 +13,17 @@
 #include <boost/log/trivial.hpp>
 #include <boost/format.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/convert.hpp>
-#include <boost/nowide/cenv.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #ifdef WIN32
 
 // The standard Windows includes.
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <Windows.h>
 #include <shellapi.h>
 
@@ -85,7 +92,7 @@ static DWORD execute_process_winapi(const std::wstring &command_line)
 	if (! ::CreateProcessW(
             nullptr /* lpApplicationName */, (LPWSTR)command_line.c_str(), nullptr /* lpProcessAttributes */, nullptr /* lpThreadAttributes */, false /* bInheritHandles */,
 			CREATE_UNICODE_ENVIRONMENT /* | CREATE_NEW_CONSOLE */ /* dwCreationFlags */, (LPVOID)envstr.c_str(), nullptr /* lpCurrentDirectory */, &startup_info, &process_info))
-		throw Slic3r::RuntimeError(std::string("Failed starting the script ") + boost::nowide::narrow(command_line) + ", Win32 error: " + std::to_string(int(::GetLastError())));
+        throw Slic3r::RuntimeError(std::string("Failed starting the script ") + boost::nowide::narrow(command_line) + ", Win32 error: " + std::to_string(int(::GetLastError())));
 	::WaitForSingleObject(process_info.hProcess, INFINITE);
 	ULONG rc = 0;
 	::GetExitCodeProcess(process_info.hProcess, &rc);
@@ -110,7 +117,7 @@ static int run_script(const std::string &script, const std::string &gcode, std::
     std::wstring command_line;
     std::wstring command = szArglist[0];
 	if (! boost::filesystem::exists(boost::filesystem::path(command)))
-		throw Slic3r::RuntimeError(std::string("The configured post-processing script does not exist: ") + boost::nowide::narrow(command));
+        throw Slic3r::RuntimeError(std::string("The configured post-processing script does not exist: ") + boost::nowide::narrow(command));
     if (boost::iends_with(command, L".pl")) {
         // This is a perl script. Run it through the perl interpreter.
         // The current process may be slic3r.exe or slic3r-console.exe.
@@ -153,7 +160,7 @@ static int run_script(const std::string &script, const std::string &gcode, std::
 {
     // Try to obtain user's default shell
     const char *shell = ::getenv("SHELL");
-    if (shell == nullptr) { shell = "sh"; }
+    if (shell == nullptr) { shell = "/bin/sh"; }
 
     // Quote and escape the gcode path argument
     std::string command { script };
@@ -184,11 +191,6 @@ static int run_script(const std::string &script, const std::string &gcode, std::
 #endif
 
 namespace Slic3r {
-
-//! macro used to mark string used at localization,
-//! return same string
-#define L(s) (s)
-#define _(s) Slic3r::I18N::translate(s)
 
 // Run post processing script / scripts if defined.
 // Returns true if a post-processing script was executed.
@@ -285,10 +287,10 @@ bool run_post_process_scripts(std::string &src_path, bool make_copy, const std::
                     throw Slic3r::RuntimeError(msg);
                 }
                 if (! boost::filesystem::exists(gcode_file)) {
-                    const std::string msg = (boost::format(_(L(
+                    const std::string msg = (boost::format(_u8L(
                         "Post-processing script %1% failed.\n\n"
                         "The post-processing script is expected to change the G-code file %2% in place, but the G-code file was deleted and likely saved under a new name.\n"
-                        "Please adjust the post-processing script to change the G-code in place and consult the manual on how to optionally rename the post-processed G-code file.\n")))
+                        "Please adjust the post-processing script to change the G-code in place and consult the manual on how to optionally rename the post-processed G-code file.\n"))
                         % script % path).str();
                     BOOST_LOG_TRIVIAL(error) << msg;
                     throw Slic3r::RuntimeError(msg);

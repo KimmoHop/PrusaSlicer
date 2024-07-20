@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Notebook_hpp_
 #define slic3r_Notebook_hpp_
 
@@ -5,7 +9,6 @@
 
 #include <wx/bookctrl.h>
 
-class ModeSizer;
 class ScalableButton;
 
 // custom message the ButtonsListCtrl sends to its parent (Notebook) to notify a selection change:
@@ -14,13 +17,13 @@ wxDECLARE_EVENT(wxCUSTOMEVT_NOTEBOOK_SEL_CHANGED, wxCommandEvent);
 class ButtonsListCtrl : public wxControl
 {
 public:
-    ButtonsListCtrl(wxWindow* parent, bool add_mode_buttons = false);
+    ButtonsListCtrl(wxWindow* parent);
     ~ButtonsListCtrl() {}
 
     void OnPaint(wxPaintEvent&);
     void SetSelection(int sel);
-    void UpdateMode();
     void Rescale();
+    void OnColorsChanged();
     bool InsertPage(size_t n, const wxString& text, bool bSelect = false, const std::string& bmp_name = "");
     void RemovePage(size_t n);
     bool SetPageImage(size_t n, const std::string& bmp_name) const;
@@ -35,7 +38,6 @@ private:
     int                             m_selection {-1};
     int                             m_btn_margin;
     int                             m_line_margin;
-    ModeSizer*                      m_mode_sizer {nullptr};
 };
 
 class Notebook: public wxBookCtrlBase
@@ -45,24 +47,22 @@ public:
                  wxWindowID winid = wxID_ANY,
                  const wxPoint & pos = wxDefaultPosition,
                  const wxSize & size = wxDefaultSize,
-                 long style = 0,
-                 bool add_mode_buttons = false)
+                 long style = 0)
     {
         Init();
-        Create(parent, winid, pos, size, style, add_mode_buttons);
+        Create(parent, winid, pos, size, style);
     }
 
     bool Create(wxWindow * parent,
                 wxWindowID winid = wxID_ANY,
                 const wxPoint & pos = wxDefaultPosition,
                 const wxSize & size = wxDefaultSize,
-                long style = 0,
-                bool add_mode_buttons = false)
+                long style = 0)
     {
         if (!wxBookCtrlBase::Create(parent, winid, pos, size, style | wxBK_TOP))
             return false;
 
-        m_bookctrl = new ButtonsListCtrl(this, add_mode_buttons);
+        m_bookctrl = new ButtonsListCtrl(this);
 
         wxSizer* mainSizer = new wxBoxSizer(IsVertical() ? wxVERTICAL : wxHORIZONTAL);
 
@@ -235,14 +235,14 @@ public:
 
     ButtonsListCtrl* GetBtnsListCtrl() const { return static_cast<ButtonsListCtrl*>(m_bookctrl); }
 
-    void UpdateMode()
-    {
-        GetBtnsListCtrl()->UpdateMode();
-    }
-
     void Rescale()
     {
         GetBtnsListCtrl()->Rescale();
+    }
+
+    void OnColorsChanged()
+    {
+        GetBtnsListCtrl()->OnColorsChanged();
     }
 
     void OnNavigationKey(wxNavigationKeyEvent& event)

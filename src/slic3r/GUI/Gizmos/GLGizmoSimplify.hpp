@@ -1,10 +1,13 @@
+///|/ Copyright (c) Prusa Research 2021 - 2023 Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01, Lukáš Hejl @hejllukas, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLGizmoSimplify_hpp_
 #define slic3r_GLGizmoSimplify_hpp_
 
-// Include GLGizmoBase.hpp before I18N.hpp as it includes some libigl code,
-// which overrides our localization "L" macro.
 #include "GLGizmoBase.hpp"
 #include "slic3r/GUI/3DScene.hpp"
+#include "slic3r/GUI/I18N.hpp"
 #include "admesh/stl.h" // indexed_triangle_set
 #include <mutex>
 #include <thread>
@@ -20,7 +23,7 @@ class NotificationManager; // for simplify suggestion
 class GLGizmoSimplify: public GLGizmoBase
 {    
 public:
-    GLGizmoSimplify(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id);
+    GLGizmoSimplify(GLCanvas3D& parent);
     virtual ~GLGizmoSimplify();
     bool on_esc_key_down();
     static void add_simplify_suggestion_notification(
@@ -38,7 +41,6 @@ protected:
     // must implement
     virtual bool on_init() override { return true;};
     virtual void on_render() override;
-    virtual void on_render_for_picking() override{};    
 
     CommonGizmosDataID on_get_requirements() const override;
 
@@ -153,6 +155,9 @@ private:
             return L("Model simplification has been canceled");
         }
     };
+
+    // only temporary solution
+    static const std::string M_ICON_FILENAME;
 };
 
 } // namespace GUI

@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2023 Tomáš Mészáros @tamasmeszaros, Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "SL1.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -15,8 +19,10 @@
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
+#include "libslic3r/Utils/JsonUtils.hpp"
 
 #include "SLAArchiveReader.hpp"
+#include "SLAArchiveFormatRegistry.hpp"
 #include "ZipperArchiveImport.hpp"
 
 #include "libslic3r/MarchingSquares.hpp"
@@ -26,7 +32,9 @@
 
 #include "libslic3r/SLA/RasterBase.hpp"
 
+
 #include <boost/property_tree/ini_parser.hpp>
+#include <boost/property_tree/json_parser.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/algorithm/string.hpp>
 
@@ -39,9 +47,114 @@ namespace {
 std::string to_ini(const ConfMap &m)
 {
     std::string ret;
-    for (auto &param : m) ret += param.first + " = " + param.second + "\n";
-    
+    for (auto &param : m)
+        ret += param.first + " = " + param.second + "\n";
+
     return ret;
+}
+
+static std::string get_key(const std::string& opt_key)
+{
+    static const std::set<std::string> ms_opts = {
+      "delay_before_exposure"
+    , "delay_after_exposure"
+    , "tilt_down_offset_delay"
+    , "tilt_up_offset_delay"
+    , "tilt_down_delay"
+    , "tilt_up_delay"
+    };
+    
+    static const std::set<std::string> nm_opts = {
+       "tower_hop_height"
+    };
+    
+    static const std::set<std::string> speed_opts = {
+      "tower_speed"
+    , "tilt_down_initial_speed"
+    , "tilt_down_finish_speed"
+    , "tilt_up_initial_speed"
+    , "tilt_up_finish_speed"
+    };
+
+    if (ms_opts.find(opt_key) != ms_opts.end())
+        return opt_key + "_ms";
+
+    if (nm_opts.find(opt_key) != nm_opts.end())
+        return opt_key + "_nm";
+
+    if (speed_opts.find(opt_key) != speed_opts.end())
+        return boost::replace_all_copy(opt_key, "_speed", "_profile");
+
+    return opt_key;
+}
+
+namespace pt = boost::property_tree;
+
+std::string to_json(const SLAPrint& print, const ConfMap &m)
+{
+    auto& cfg = print.full_print_config();
+
+    pt::ptree below_node;
+    pt::ptree above_node;
+
+    const t_config_enum_names& tilt_enum_names  = ConfigOptionEnum< TiltSpeeds>::get_enum_names();
+    const t_config_enum_names& tower_enum_names = ConfigOptionEnum<TowerSpeeds>::get_enum_names();
+
+    for (const std::string& opt_key : tilt_options()) {
+        const ConfigOption* opt = cfg.option(opt_key);
+        assert(opt != nullptr);
+
+        switch (opt->type()) {
+        case coFloats: {
+            auto values = static_cast<const ConfigOptionFloats*>(opt);
+            // those options have to be exported in ms instead of s
+            below_node.put<double>(get_key(opt_key), int(1000 * values->get_at(0)));
+            above_node.put<double>(get_key(opt_key), int(1000 * values->get_at(1)));
+        }
+        break;
+        case coInts: {
+            auto values = static_cast<const ConfigOptionInts*>(opt);
+            int koef = opt_key == "tower_hop_height" ? 1000000 : 1;
+            below_node.put<int>(get_key(opt_key), koef * values->get_at(0));
+            above_node.put<int>(get_key(opt_key), koef * values->get_at(1));
+        }
+        break;
+        case coBools: {
+            auto values = static_cast<const ConfigOptionBools*>(opt);
+            below_node.put<bool>(get_key(opt_key), values->get_at(0));
+            above_node.put<bool>(get_key(opt_key), values->get_at(1));
+        }
+        break;
+        case coEnums: {
+            const t_config_enum_names& enum_names = opt_key == "tower_speed" ? tower_enum_names : tilt_enum_names;
+            auto values = static_cast<const ConfigOptionEnums<TiltSpeeds>*>(opt);
+            below_node.put(get_key(opt_key), enum_names[values->get_at(0)]);
+            above_node.put(get_key(opt_key), enum_names[values->get_at(1)]);
+        }
+        break;
+        case coNone:
+        default:
+            break;
+        }
+    }
+
+    pt::ptree profile_node;
+    profile_node.put("area_fill", cfg.option("area_fill")->serialize());
+    profile_node.add_child("below_area_fill", below_node);
+    profile_node.add_child("above_area_fill", above_node);
+
+    pt::ptree root;
+    // params from config.ini
+    for (auto& param : m)
+        root.put(param.first, param.second );
+
+    root.put("version", "1");
+    root.add_child("exposure_profile", profile_node);
+
+    // Boost confirms its implementation has no 100% conformance to JSON standard. 
+    // In the boost libraries, boost will always serialize each value as string and parse all values to a string equivalent.
+    // so, post-prosess output
+    return write_json_with_post_process(root);
 }
 
 std::string get_cfg_value(const DynamicPrintConfig &cfg, const std::string &key)
@@ -63,7 +176,8 @@ void fill_iniconf(ConfMap &m, const SLAPrint &print)
     m["layerHeight"]    = get_cfg_value(cfg, "layer_height");
     m["expTime"]        = get_cfg_value(cfg, "exposure_time");
     m["expTimeFirst"]   = get_cfg_value(cfg, "initial_exposure_time");
-    m["expUserProfile"] = get_cfg_value(cfg, "material_print_speed") == "slow" ? "1" : "0";
+    const std::string mps = get_cfg_value(cfg, "material_print_speed");
+    m["expUserProfile"] = mps == "slow" ? "1" : mps == "fast" ? "0" : "2";
     m["materialName"]   = get_cfg_value(cfg, "sla_material_settings_id");
     m["printerModel"]   = get_cfg_value(cfg, "printer_model");
     m["printerVariant"] = get_cfg_value(cfg, "printer_variant");
@@ -115,10 +229,15 @@ void fill_slicerconf(ConfMap &m, const SLAPrint &print)
     auto is_banned = [](const std::string &key) {
         return std::binary_search(banned_keys.begin(), banned_keys.end(), key);
     };
+
+    auto is_tilt_param = [](const std::string& key) -> bool {
+        const auto& keys = tilt_options();
+        return std::find(keys.begin(), keys.end(), key) != keys.end();
+    };
     
     auto &cfg = print.full_print_config();
     for (const std::string &key : cfg.keys())
-        if (! is_banned(key) && ! cfg.option(key)->is_nil())
+        if (! is_banned(key) && !is_tilt_param(key) && ! cfg.option(key)->is_nil())
             m[key] = cfg.opt_serialize(key);
     
 }
@@ -203,6 +322,9 @@ void SL1Archive::export_print(Zipper               &zipper,
         zipper << to_ini(iniconf);
         zipper.add_entry("prusaslicer.ini");
         zipper << to_ini(slicerconf);
+
+        zipper.add_entry("config.json");
+        zipper << to_json(print, iniconf);
 
         size_t i = 0;
         for (const sla::EncodedRaster &rst : m_layers) {
@@ -435,7 +557,7 @@ ConfigSubstitutions SL1Reader::read(std::vector<ExPolygons> &slices,
 
 ConfigSubstitutions SL1Reader::read(DynamicPrintConfig &out)
 {
-    ZipperArchive arch = read_zipper_archive(m_fname, {}, {"png"});
+    ZipperArchive arch = read_zipper_archive(m_fname, {"ini"}, {"png", "thumbnail"});
     return out.load(arch.profile, ForwardCompatibilitySubstitutionRule::Enable);
 }
 

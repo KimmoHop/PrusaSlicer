@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 David Kocík @kocikdav, Lukáš Hejl @hejllukas, Oleksandra Iushchenko @YuSanka, Vojtěch Král @vojtechkral, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_UpdateDialogs_hpp_
 #define slic3r_UpdateDialogs_hpp_
 
@@ -42,7 +46,7 @@ private:
 class AppUpdateAvailableDialog : public MsgDialog
 {
 public:
-	AppUpdateAvailableDialog(const Semver& ver_current, const Semver& ver_online);
+	AppUpdateAvailableDialog(const Semver& ver_current, const Semver& ver_online, bool from_user);
 	AppUpdateAvailableDialog(AppUpdateAvailableDialog&&) = delete;
 	AppUpdateAvailableDialog(const AppUpdateAvailableDialog&) = delete;
 	AppUpdateAvailableDialog& operator=(AppUpdateAvailableDialog&&) = delete;
@@ -53,7 +57,7 @@ public:
 	bool disable_version_check() const;
 	static wxSize AUAD_size;
 private:
-	wxCheckBox* cbox;
+	wxCheckBox* cbox {nullptr};
 };
 
 class AppUpdateDownloadDialog : public MsgDialog
@@ -73,6 +77,7 @@ public:
 private:
 	wxCheckBox* cbox_run;
 	wxTextCtrl* txtctrl_path;
+	wxString filename;
 };
 
 // Confirmation dialog informing about configuration update. Lists updated bundles & their versions.
@@ -85,12 +90,14 @@ public:
 		Semver version;
 		std::string comment;
 		std::string changelog_url;
+		std::string new_printers;
 
-		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url)
+		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url, std::string new_printers)
 			: vendor(std::move(vendor))
 			, version(std::move(version))
 			, comment(std::move(comment))
 			, changelog_url(std::move(changelog_url))
+			, new_printers(std::move(new_printers))
 		{}
 	};
 
@@ -113,12 +120,14 @@ public:
 		Semver version;
 		std::string comment;
 		std::string changelog_url;
+		std::string new_printers;
 
-		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url)
+		Update(std::string vendor, Semver version, std::string comment, std::string changelog_url, std::string new_printers)
 			: vendor(std::move(vendor))
 			, version(std::move(version))
 			, comment(std::move(comment))
 			, changelog_url(std::move(changelog_url))
+			, new_printers(std::move(new_printers))
 		{}
 	};
 

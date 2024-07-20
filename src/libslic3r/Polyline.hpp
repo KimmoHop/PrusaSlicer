@@ -1,3 +1,13 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Tomáš Mészáros @tamasmeszaros, Pavel Mikuš @Godrak, Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Lukáš Matěna @lukasmatena, Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/
+///|/ ported from lib/Slic3r/Polyline.pm:
+///|/ Copyright (c) Prusa Research 2018 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2014 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2012 Mark Hindess
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Polyline_hpp_
 #define slic3r_Polyline_hpp_
 
@@ -10,14 +20,13 @@
 namespace Slic3r {
 
 class Polyline;
-class ThickPolyline;
+struct ThickPolyline;
 typedef std::vector<Polyline> Polylines;
 typedef std::vector<ThickPolyline> ThickPolylines;
 
 class Polyline : public MultiPoint {
 public:
     Polyline() = default;
-    ~Polyline() override = default;
     Polyline(const Polyline &other) : MultiPoint(other.points) {}
     Polyline(Polyline &&other) : MultiPoint(std::move(other.points)) {}
     Polyline(std::initializer_list<Point> list) : MultiPoint(list) {}
@@ -61,9 +70,13 @@ public:
         }
     }
   
-    const Point& last_point() const override { return this->points.back(); }
+    Point& operator[](Points::size_type idx) { return this->points[idx]; }
+    const Point& operator[](Points::size_type idx) const { return this->points[idx]; }
+
+    double length() const;
+    const Point& last_point() const { return this->points.back(); }
     const Point& leftmost_point() const;
-    Lines lines() const override;
+    Lines lines() const;
 
     void clip_end(double distance);
     void clip_start(double distance);
@@ -75,6 +88,9 @@ public:
     void split_at(const Point &point, Polyline* p1, Polyline* p2) const;
     bool is_straight() const;
     bool is_closed() const { return this->points.front() == this->points.back(); }
+
+    using iterator = Points::iterator;
+    using const_iterator = Points::const_iterator;
 };
 
 inline bool operator==(const Polyline &lhs, const Polyline &rhs) { return lhs.points == rhs.points; }
@@ -82,6 +98,10 @@ inline bool operator!=(const Polyline &lhs, const Polyline &rhs) { return lhs.po
 
 extern BoundingBox get_extents(const Polyline &polyline);
 extern BoundingBox get_extents(const Polylines &polylines);
+
+// Return True when erase some otherwise False.
+bool remove_same_neighbor(Polyline &polyline);
+bool remove_same_neighbor(Polylines &polylines);
 
 inline double total_length(const Polylines &polylines) {
     double total = 0;
@@ -150,28 +170,83 @@ inline void polylines_append(Polylines &dst, Polylines &&src)
     }
 }
 
+// Merge polylines at their respective end points.
+// dst_first: the merge point is at dst.begin() or dst.end()?
+// src_first: the merge point is at src.begin() or src.end()?
+// The orientation of the resulting polyline is unknown, the output polyline may start
+// either with src piece or dst piece.
+template<typename PointsType>
+inline void polylines_merge(PointsType &dst, bool dst_first, PointsType &&src, bool src_first)
+{
+    if (dst_first) {
+        if (src_first)
+            std::reverse(dst.begin(), dst.end());
+        else
+            std::swap(dst, src);
+    } else if (! src_first)
+        std::reverse(src.begin(), src.end());
+    // Merge src into dst.
+    append(dst, std::move(src));
+}
+
 const Point& leftmost_point(const Polylines &polylines);
 
 bool remove_degenerate(Polylines &polylines);
 
-class ThickPolyline : public Polyline {
-public:
-    ThickPolyline() : endpoints(std::make_pair(false, false)) {}
+// Returns index of a segment of a polyline and foot point of pt on polyline.
+std::pair<int, Point> foot_pt(const Points &polyline, const Point &pt);
+
+struct ThickPolyline {
+    ThickPolyline() = default;
     ThickLines thicklines() const;
+
+    const Point& first_point()  const { return this->points.front(); }
+    const Point& last_point()   const { return this->points.back(); }
+    size_t       size()         const { return this->points.size(); }
+    bool         is_valid()     const { return this->points.size() >= 2; }
+    bool         empty()        const { return this->points.empty(); }
+    double       length()       const { return Slic3r::length(this->points); }
+
+    void         clear() { this->points.clear(); this->width.clear(); }
+
     void reverse() {
-        Polyline::reverse();
+        std::reverse(this->points.begin(), this->points.end());
         std::reverse(this->width.begin(), this->width.end());
         std::swap(this->endpoints.first, this->endpoints.second);
     }
 
-    std::vector<coordf_t> width;
-    std::pair<bool,bool>  endpoints;
+    void clip_end(double distance);
+
+    // Make this closed ThickPolyline starting in the specified index.
+    // Be aware that this method can be applicable just for closed ThickPolyline.
+    // On open ThickPolyline make no effect.
+    void start_at_index(int index);
+
+    Points                  points;
+    // vector of startpoint width and endpoint width of each line segment. The size should be always (points.size()-1) * 2
+    // e.g. let four be points a,b,c,d. that are three lines ab, bc, cd. for each line, there should be start width, so the width vector is:
+    // w(a), w(b), w(b), w(c), w(c), w(d)
+    std::vector<coordf_t>   width;
+    std::pair<bool,bool>    endpoints { false, false };
 };
+
+inline ThickPolylines to_thick_polylines(Polylines &&polylines, const coordf_t width)
+{
+    ThickPolylines out;
+    out.reserve(polylines.size());
+    for (Polyline &polyline : polylines) {
+        out.emplace_back();
+        out.back().width.assign((polyline.points.size() - 1) * 2, width);
+        out.back().points = std::move(polyline.points);
+    }
+    return out;
+}
 
 class Polyline3 : public MultiPoint3
 {
 public:
-    virtual Lines3 lines() const;
+    double length() const;
+    Lines3 lines() const;
 };
 
 typedef std::vector<Polyline3> Polylines3;

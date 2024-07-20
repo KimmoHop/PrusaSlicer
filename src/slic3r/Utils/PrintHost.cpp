@@ -1,3 +1,12 @@
+///|/ Copyright (c) 2023 Pedro Lamas @PedroLamas
+///|/ Copyright (c) Prusa Research 2018 - 2023 David Kocík @kocikdav, Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2020 Sergey Kovalev @RandoMan70
+///|/ Copyright (c) 2019 Spencer Owen @spuder
+///|/ Copyright (c) 2019 Stephan Reichhelm @stephanr
+///|/ Copyright (c) 2018 Martin Loidl @LoidlM
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "PrintHost.hpp"
 
 #include <vector>
@@ -19,6 +28,8 @@
 #include "AstroBox.hpp"
 #include "Repetier.hpp"
 #include "MKS.hpp"
+#include "Moonraker.hpp"
+#include "PrusaConnect.hpp"
 #include "../GUI/PrintHostDialogs.hpp"
 
 namespace fs = boost::filesystem;
@@ -52,10 +63,17 @@ PrintHost* PrintHost::get_print_host(DynamicPrintConfig *config)
             case htAstroBox:  return new AstroBox(config);
             case htRepetier:  return new Repetier(config);
             case htPrusaLink: return new PrusaLink(config);
+            case htPrusaConnect: return new PrusaConnect(config);
+            case htPrusaConnectNew: return new PrusaConnectNew(config);
             case htMKS:       return new MKS(config);
+            case htMoonraker: return new Moonraker(config);
             default:          return nullptr;
         }
     } else {
+        const auto opt = config->option<ConfigOptionEnum<PrintHostType>>("host_type");
+        if (opt != nullptr && opt->value == htPrusaConnectNew) {
+            return new PrusaConnectNew(config);
+        }        
         return new SL1Host(config);
     }
 }
@@ -93,10 +111,13 @@ struct PrintHostJobQueue::priv
     void emit_progress(int progress);
     void emit_error(wxString error);
     void emit_cancel(size_t id);
+    void emit_info(wxString tag, wxString status);
     void start_bg_thread();
     void stop_bg_thread();
     void bg_thread_main();
     void progress_fn(Http::Progress progress, bool &cancel);
+    void error_fn(wxString error);
+    void info_fn(wxString tag, wxString status);
     void remove_source(const fs::path &path);
     void remove_source();
     void perform_job(PrintHostJob the_job);
@@ -122,6 +143,12 @@ void PrintHostJobQueue::priv::emit_progress(int progress)
 void PrintHostJobQueue::priv::emit_error(wxString error)
 {
     auto evt = new PrintHostQueueDialog::Event(GUI::EVT_PRINTHOST_ERROR, queue_dialog->GetId(), job_id, std::move(error));
+    wxQueueEvent(queue_dialog, evt);
+}
+
+void PrintHostJobQueue::priv::emit_info(wxString tag, wxString status)
+{
+    auto evt = new PrintHostQueueDialog::Event(GUI::EVT_PRINTHOST_INFO, queue_dialog->GetId(), job_id, std::move(tag), std::move(status));
     wxQueueEvent(queue_dialog, evt);
 }
 
@@ -233,6 +260,40 @@ void PrintHostJobQueue::priv::progress_fn(Http::Progress progress, bool &cancel)
     }
 }
 
+void PrintHostJobQueue::priv::error_fn(wxString error)
+{
+    // check if transfer was not canceled before error occured - than do not show the error
+    bool do_emit_err = true;
+    if (channel_cancels.size_hint() > 0) {
+        // Lock both queues
+        auto cancels = channel_cancels.lock_rw();
+        auto jobs = channel_jobs.lock_rw();
+
+        for (size_t cancel_id : *cancels) {
+            if (cancel_id == job_id) {
+                do_emit_err = false;
+                emit_cancel(job_id);
+            }
+            else if (cancel_id > job_id) {
+                const size_t idx = cancel_id - job_id - 1;
+                if (idx < jobs->size()) {
+                    jobs->at(idx).cancelled = true;
+                    BOOST_LOG_TRIVIAL(debug) << boost::format("PrintHostJobQueue: Job id %1% cancelled") % cancel_id;
+                    emit_cancel(cancel_id);
+                }
+            }
+        }
+        cancels->clear();
+    }
+    if (do_emit_err)
+        emit_error(std::move(error));
+}
+
+void PrintHostJobQueue::priv::info_fn(wxString tag, wxString status)
+{
+    emit_info(tag, status);
+}
+
 void PrintHostJobQueue::priv::remove_source(const fs::path &path)
 {
     if (! path.empty()) {
@@ -255,10 +316,9 @@ void PrintHostJobQueue::priv::perform_job(PrintHostJob the_job)
     emit_progress(0);   // Indicate the upload is starting
 
     bool success = the_job.printhost->upload(std::move(the_job.upload_data),
-        [this](Http::Progress progress, bool &cancel) { this->progress_fn(std::move(progress), cancel); },
-        [this](wxString error) {
-            emit_error(std::move(error));
-        }
+        [this](Http::Progress progress, bool &cancel)   { this->progress_fn(std::move(progress), cancel); },
+        [this](wxString error)                          { this->error_fn(std::move(error)); },
+        [this](wxString tag, wxString host)             { this->info_fn(std::move(tag), std::move(host)); }
     );
 
     if (success) {

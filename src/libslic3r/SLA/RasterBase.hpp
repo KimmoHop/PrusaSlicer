@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2020 - 2022 Tomáš Mészáros @tamasmeszaros, Vojtěch Bubník @bubnikv
+///|/ Copyright (c) 2022 ole00 @ole00
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef SLA_RASTERBASE_HPP
 #define SLA_RASTERBASE_HPP
 
@@ -9,7 +14,6 @@
 #include <cstdint>
 
 #include <libslic3r/ExPolygon.hpp>
-//#include <libslic3r/SLA/Concurrency.hpp>
 
 namespace Slic3r {
 
@@ -61,10 +65,10 @@ public:
     enum Orientation { roLandscape, roPortrait };
     
     using TMirroring = std::array<bool, 2>;
-    static const TMirroring NoMirror;
-    static const TMirroring MirrorX;
-    static const TMirroring MirrorY;
-    static const TMirroring MirrorXY;
+    static const constexpr TMirroring NoMirror = {false, false};
+    static const constexpr TMirroring MirrorX  = {true, false};
+    static const constexpr TMirroring MirrorY  = {false, true};
+    static const constexpr TMirroring MirrorXY = {true, true};
     
     struct Trafo {
         bool mirror_x = false, mirror_y = false, flipXY = false;

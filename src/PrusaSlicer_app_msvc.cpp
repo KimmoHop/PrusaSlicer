@@ -1,13 +1,15 @@
 // Why?
 #define _WIN32_WINNT 0x0502
 // The standard Windows includes.
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
+#ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+#endif // WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
+    #define NOMINMAX
+#endif // NOMINMAX
 #include <Windows.h>
 #include <shellapi.h>
 #include <wchar.h>
-
-
 
 #ifdef SLIC3R_GUI
 extern "C"
@@ -242,13 +244,14 @@ int wmain(int argc, wchar_t **argv)
 #ifdef SLIC3R_GUI
     // Here one may push some additional parameters based on the wrapper type.
     bool force_mesa = false;
+    bool force_hw   = false;
 #endif /* SLIC3R_GUI */
     for (int i = 1; i < argc; ++ i) {
 #ifdef SLIC3R_GUI
         if (wcscmp(argv[i], L"--sw-renderer") == 0)
             force_mesa = true;
         else if (wcscmp(argv[i], L"--no-sw-renderer") == 0)
-            force_mesa = false;
+            force_hw = true;
 #endif /* SLIC3R_GUI */
         argv_extended.emplace_back(argv[i]);
     }
@@ -261,9 +264,9 @@ int wmain(int argc, wchar_t **argv)
         force_mesa ||
         // Running over a rempote desktop, and the RemoteFX is not enabled, therefore Windows will only provide SW OpenGL 1.1 context.
         // In that case, use Mesa.
-        ::GetSystemMetrics(SM_REMOTESESSION) ||
+        (::GetSystemMetrics(SM_REMOTESESSION) && !force_hw) ||
         // Try to load the default OpenGL driver and test its context version.
-        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(2, 0);
+        ! opengl_version_check.load_opengl_dll() || ! opengl_version_check.is_version_greater_or_equal_to(3, 2);
 #endif /* SLIC3R_GUI */
 
     wchar_t path_to_exe[MAX_PATH + 1] = { 0 };

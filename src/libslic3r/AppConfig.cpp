@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2017 - 2023 Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak, David Kocík @kocikdav, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Lukáš Hejl @hejllukas, Filip Sykala @Jony01, Vojtěch Král @vojtechkral
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Utils.hpp"
 #include "AppConfig.hpp"
@@ -12,7 +16,6 @@
 
 #include <boost/filesystem/path.hpp>
 #include <boost/filesystem/operations.hpp>
-#include <boost/nowide/cenv.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
@@ -34,11 +37,17 @@ static const std::string MODEL_PREFIX = "model:";
 // to show this notification. On the other hand, we would like PrusaSlicer 2.3.2 to show an update notification of the upcoming PrusaSlicer 2.4.0.
 // Thus we will let PrusaSlicer 2.3.2 and couple of follow-up versions to download the version number from an alternate file until the PrusaSlicer 2.3.0/2.3.1
 // are phased out, then we will revert to the original name.
-//static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version";
-static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version2";
+// For 2.6.0-alpha1 we have switched back to the original. The file should contain data for AppUpdater.cpp
+static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version";
+//static const std::string VERSION_CHECK_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/PrusaSlicer.version2";
+// Url to index archive zip that contains latest indicies
+static const std::string INDEX_ARCHIVE_URL= "https://files.prusa3d.com/wp-content/uploads/repository/vendor_indices.zip";
+// Url to folder with vendor profile files. Used when downloading new profiles that are not in resources folder.
+static const std::string PROFILE_FOLDER_URL = "https://files.prusa3d.com/wp-content/uploads/repository/PrusaSlicer-settings-master/live/";
 
 const std::string AppConfig::SECTION_FILAMENTS = "filaments";
 const std::string AppConfig::SECTION_MATERIALS = "sla_materials";
+const std::string AppConfig::SECTION_EMBOSS_STYLE = "font";
 
 void AppConfig::reset()
 {
@@ -60,6 +69,9 @@ void AppConfig::set_defaults()
         // Disable background processing by default as it is not stable.
         if (get("background_processing").empty())
             set("background_processing", "0");
+        // Enable support issues alerts by default
+        if (get("alert_when_supports_needed").empty())
+            set("alert_when_supports_needed", "1");
         // If set, the "Controller" tab for the control of the printer over serial line and the serial port settings are hidden.
         // By default, Prusa has the controller hidden.
         if (get("no_controller").empty())
@@ -67,6 +79,8 @@ void AppConfig::set_defaults()
         // If set, the "- default -" selections of print/filament/printer are suppressed, if there is a valid preset available.
         if (get("no_defaults").empty())
             set("no_defaults", "1");
+        if (get("no_templates").empty())
+            set("no_templates", "0");
         if (get("show_incompatible_presets").empty())
             set("show_incompatible_presets", "0");
 
@@ -87,18 +101,13 @@ void AppConfig::set_defaults()
         if (get("associate_stl").empty())
             set("associate_stl", "0");
 
-        if (get("tabs_as_menu").empty())
-            set("tabs_as_menu", "0");
+        if (get("suppress_round_corners").empty())
+            set("suppress_round_corners", "1");
 #endif // _WIN32
 
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
             erase("", "use_legacy_opengl");
-
-#ifdef __APPLE__
-        if (get("use_retina_opengl").empty())
-            set("use_retina_opengl", "1");
-#endif
 
         if (get("single_instance").empty())
             set("single_instance", 
@@ -123,6 +132,9 @@ void AppConfig::set_defaults()
 
         if (get("auto_toolbar_size").empty())
             set("auto_toolbar_size", "100");
+
+        if (get("use_binary_gcode_when_supported").empty())
+            set("use_binary_gcode_when_supported", "1");
  
        if (get("notify_release").empty())
            set("notify_release", "all"); // or "none" or "release"
@@ -150,10 +162,8 @@ void AppConfig::set_defaults()
         if (get("order_volumes").empty())
             set("order_volumes", "1");
 
-#if ENABLE_SHOW_NON_MANIFOLD_EDGES
         if (get("non_manifold_edges").empty())
             set("non_manifold_edges", "1");
-#endif // ENABLE_SHOW_NON_MANIFOLD_EDGES
 
         if (get("clear_undo_redo_stack_on_new_project").empty())
             set("clear_undo_redo_stack_on_new_project", "1");
@@ -162,8 +172,15 @@ void AppConfig::set_defaults()
 #ifdef _WIN32
         if (get("associate_gcode").empty())
             set("associate_gcode", "0");
+        if (get("associate_bgcode").empty())
+            set("associate_bgcode", "0");
 #endif // _WIN32
     }
+
+#ifdef __APPLE__
+    if (get("use_retina_opengl").empty())
+        set("use_retina_opengl", "1");
+#endif // __APPLE__
 
     if (get("seq_top_layer_only").empty())
         set("seq_top_layer_only", "1");
@@ -186,8 +203,29 @@ void AppConfig::set_defaults()
     if (get("show_hints").empty())
         set("show_hints", "1");
 
+    if (get("allow_auto_color_change").empty())
+        set("allow_auto_color_change", "1");
+
     if (get("allow_ip_resolve").empty())
         set("allow_ip_resolve", "1");
+
+    if (get("wifi_config_dialog_declined").empty())
+        set("wifi_config_dialog_declined", "0");
+
+    if (get("connect_polling").empty())
+        set("connect_polling", "1");
+
+    if (get("auth_login_dialog_confirmed").empty())
+        set("auth_login_dialog_confirmed", "0");
+
+    if (get("show_estimated_times_in_dbl_slider").empty())
+        set("show_estimated_times_in_dbl_slider", "1");
+
+    if (get("show_ruler_in_dbl_slider").empty())
+        set("show_ruler_in_dbl_slider", "0");
+
+    if (get("show_ruler_bg_in_dbl_slider").empty())
+        set("show_ruler_bg_in_dbl_slider", "1");
 
 #ifdef _WIN32
     if (get("use_legacy_3DConnexion").empty())
@@ -328,12 +366,6 @@ std::string AppConfig::load(const std::string &path)
             // Error while parsing config file. We'll customize the error message and rethrow to be displayed.
             // ! But to avoid the use of _utf8 (related to use of wxWidgets) 
             // we will rethrow this exception from the place of load() call, if returned value wouldn't be empty
-            /*
-            throw Slic3r::RuntimeError(
-                _utf8(L("Error parsing PrusaSlicer config file, it is probably corrupted. "
-                        "Try to manually delete the file to recover from the error. Your user profiles will not be affected.")) +
-                "\n\n" + AppConfig::config_path() + "\n\n" + ex.what());
-            */
             return ex.what();
         }
     }
@@ -405,12 +437,8 @@ std::string AppConfig::load()
 
 void AppConfig::save()
 {
-    {
-        // Returns "undefined" if the thread naming functionality is not supported by the operating system.
-        std::optional<std::string> current_thread_name = get_current_thread_name();
-        if (current_thread_name && *current_thread_name != "slic3r_main")
-            throw CriticalException("Calling AppConfig::save() from a worker thread!");
-    }
+    if (! is_main_thread_active())
+        throw CriticalException("Calling AppConfig::save() from a worker thread!");
 
     // The config is first written to a file with a PID suffix and then moved
     // to avoid race conditions with multiple instances of Slic3r
@@ -479,6 +507,46 @@ void AppConfig::save()
     m_dirty = false;
 }
 
+bool AppConfig::erase(const std::string &section, const std::string &key)
+{       
+    if (auto it_storage = m_storage.find(section); it_storage != m_storage.end()) {
+        auto &section = it_storage->second;
+        auto it = section.find(key);
+        if (it != section.end()) {
+            section.erase(it);
+            m_dirty = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool AppConfig::set_section(const std::string &section, std::map<std::string, std::string> data)
+{ 
+    auto it_section = m_storage.find(section);
+    if (it_section == m_storage.end()) {
+        if (data.empty())
+            return false;
+        it_section = m_storage.insert({ section, {} }).first;
+    }
+    auto &dst = it_section->second;
+    if (dst == data)
+        return false;
+    dst = std::move(data);
+    m_dirty = true;
+    return true;
+}
+
+bool AppConfig::clear_section(const std::string &section)
+{ 
+    if (auto it_section = m_storage.find(section); it_section != m_storage.end() && ! it_section->second.empty()) {
+        it_section->second.clear();
+        m_dirty = true;
+        return true;
+    }
+    return false;
+}
+
 bool AppConfig::get_variant(const std::string &vendor, const std::string &model, const std::string &variant) const
 {
     const auto it_v = m_vendors.find(vendor);
@@ -487,28 +555,47 @@ bool AppConfig::get_variant(const std::string &vendor, const std::string &model,
     return it_m == it_v->second.end() ? false : it_m->second.find(variant) != it_m->second.end();
 }
 
-void AppConfig::set_variant(const std::string &vendor, const std::string &model, const std::string &variant, bool enable)
+bool AppConfig::set_variant(const std::string &vendor, const std::string &model, const std::string &variant, bool enable)
 {
     if (enable) {
-        if (get_variant(vendor, model, variant)) { return; }
+        if (get_variant(vendor, model, variant))
+            return false;
         m_vendors[vendor][model].insert(variant);
     } else {
         auto it_v = m_vendors.find(vendor);
-        if (it_v == m_vendors.end()) { return; }
+        if (it_v == m_vendors.end())
+            return false;
         auto it_m = it_v->second.find(model);
-        if (it_m == it_v->second.end()) { return; }
+        if (it_m == it_v->second.end())
+            return false;
         auto it_var = it_m->second.find(variant);
-        if (it_var == it_m->second.end()) { return; }
+        if (it_var == it_m->second.end())
+            return false;
         it_m->second.erase(it_var);
     }
     // If we got here, there was an update
     m_dirty = true;
+    return true;
 }
 
-void AppConfig::set_vendors(const AppConfig &from)
+bool AppConfig::set_vendors(const VendorMap &vendors)
 {
-    m_vendors = from.m_vendors;
-    m_dirty = true;
+    if (m_vendors != vendors) {
+        m_vendors = vendors;
+        m_dirty = true;
+        return true;
+    } else
+        return false;
+}
+
+bool AppConfig::set_vendors(VendorMap &&vendors)
+{
+    if (m_vendors != vendors) {
+        m_vendors = std::move(vendors);
+        m_dirty = true;
+        return true;
+    } else
+        return false;
 }
 
 std::string AppConfig::get_last_dir() const
@@ -543,34 +630,52 @@ std::vector<std::string> AppConfig::get_recent_projects() const
     return ret;
 }
 
-void AppConfig::set_recent_projects(const std::vector<std::string>& recent_projects)
+bool AppConfig::set_recent_projects(const std::vector<std::string>& recent_projects)
 {
-    auto it = m_storage.find("recent_projects");
-    if (it == m_storage.end())
-        it = m_storage.insert(std::map<std::string, std::map<std::string, std::string>>::value_type("recent_projects", std::map<std::string, std::string>())).first;
-
-    it->second.clear();
-    for (unsigned int i = 0; i < (unsigned int)recent_projects.size(); ++i)
-    {
-        it->second[std::to_string(i + 1)] = recent_projects[i];
+    static constexpr const char *section = "recent_projects";
+    auto it_section = m_storage.find(section);
+    if (it_section == m_storage.end()) {
+        if (recent_projects.empty())
+            return false;
+        it_section = m_storage.insert({ std::string(section), {} }).first;
     }
+    auto &dst = it_section->second;
+
+    std::map<std::string, std::string> src;
+    for (unsigned int i = 0; i < (unsigned int)recent_projects.size(); ++i)
+        src[std::to_string(i + 1)] = recent_projects[i];
+
+    if (src != dst) {
+        dst = std::move(src);
+        m_dirty = true;
+        return true;
+    } else
+        return false;
 }
 
-void AppConfig::set_mouse_device(const std::string& name, double translation_speed, double translation_deadzone,
+bool AppConfig::set_mouse_device(const std::string& name, double translation_speed, double translation_deadzone,
                                  float rotation_speed, float rotation_deadzone, double zoom_speed, bool swap_yz)
 {
-    std::string key = std::string("mouse_device:") + name;
-    auto it = m_storage.find(key);
-    if (it == m_storage.end())
-        it = m_storage.insert(std::map<std::string, std::map<std::string, std::string>>::value_type(key, std::map<std::string, std::string>())).first;
+    const std::string key = std::string("mouse_device:") + name;
+    auto it_section = m_storage.find(key);
+    if (it_section == m_storage.end())
+        it_section = m_storage.insert({ key, {} }).first;
+    auto &dst = it_section->second;
 
-    it->second.clear();
-    it->second["translation_speed"] = float_to_string_decimal_point(translation_speed);
-    it->second["translation_deadzone"] = float_to_string_decimal_point(translation_deadzone);
-    it->second["rotation_speed"] = float_to_string_decimal_point(rotation_speed);
-    it->second["rotation_deadzone"] = float_to_string_decimal_point(rotation_deadzone);
-    it->second["zoom_speed"] = float_to_string_decimal_point(zoom_speed);
-    it->second["swap_yz"] = swap_yz ? "1" : "0";
+    std::map<std::string, std::string> src;
+    src["translation_speed"]    = float_to_string_decimal_point(translation_speed);
+    src["translation_deadzone"] = float_to_string_decimal_point(translation_deadzone);
+    src["rotation_speed"]       = float_to_string_decimal_point(rotation_speed);
+    src["rotation_deadzone"]    = float_to_string_decimal_point(rotation_deadzone);
+    src["zoom_speed"]           = float_to_string_decimal_point(zoom_speed);
+    src["swap_yz"]              = swap_yz ? "1" : "0";
+
+    if (src != dst) {
+        dst = std::move(src);
+        m_dirty = true;
+        return true;
+    } else
+        return false;
 }
 
 std::vector<std::string> AppConfig::get_mouse_device_names() const
@@ -584,36 +689,18 @@ std::vector<std::string> AppConfig::get_mouse_device_names() const
     return out;
 }
 
-void AppConfig::update_config_dir(const std::string &dir)
+bool AppConfig::update_config_dir(const std::string &dir)
 {
-    this->set("recent", "config_directory", dir);
+    return this->set("recent", "config_directory", dir);
 }
 
-void AppConfig::update_skein_dir(const std::string &dir)
+bool AppConfig::update_skein_dir(const std::string &dir)
 {
     if (is_shapes_dir(dir))
-        return; // do not save "shapes gallery" directory
-    this->set("recent", "skein_directory", dir);
-}
-/*
-std::string AppConfig::get_last_output_dir(const std::string &alt) const
-{
-	
-    const auto it = m_storage.find("");
-    if (it != m_storage.end()) {
-        const auto it2 = it->second.find("last_output_path");
-        const auto it3 = it->second.find("remember_output_path");
-        if (it2 != it->second.end() && it3 != it->second.end() && ! it2->second.empty() && it3->second == "1")
-            return it2->second;
-    }
-    return alt;
+        return false; // do not save "shapes gallery" directory
+    return this->set("recent", "skein_directory", dir);
 }
 
-void AppConfig::update_last_output_dir(const std::string &dir)
-{
-    this->set("", "last_output_path", dir);
-}
-*/
 std::string AppConfig::get_last_output_dir(const std::string& alt, const bool removable) const
 {
 	std::string s1 = (removable ? "last_output_path_removable" : "last_output_path");
@@ -628,9 +715,9 @@ std::string AppConfig::get_last_output_dir(const std::string& alt, const bool re
 	return is_shapes_dir(alt) ? get_last_dir() : alt;
 }
 
-void AppConfig::update_last_output_dir(const std::string& dir, const bool removable)
+bool AppConfig::update_last_output_dir(const std::string& dir, const bool removable)
 {
-	this->set("", (removable ? "last_output_path_removable" : "last_output_path"), dir);
+	return this->set("", (removable ? "last_output_path_removable" : "last_output_path"), dir);
 }
 
 
@@ -648,7 +735,7 @@ void AppConfig::reset_selections()
     }
 }
 
-std::string AppConfig::config_path()
+std::string AppConfig::config_path() const
 {
     std::string path = (m_mode == EAppMode::Editor) ?
         (boost::filesystem::path(Slic3r::data_dir()) / (SLIC3R_APP_KEY ".ini")).make_preferred().string() :
@@ -663,7 +750,27 @@ std::string AppConfig::version_check_url() const
     return from_settings.empty() ? VERSION_CHECK_URL : from_settings;
 }
 
-bool AppConfig::exists()
+std::string AppConfig::index_archive_url() const
+{
+#if 0  
+    // this code is for debug & testing purposes only - changed url wont get trough inner checks anyway. 
+    auto from_settings = get("index_archive_url");
+    return from_settings.empty() ? INDEX_ARCHIVE_URL : from_settings;
+#endif
+    return INDEX_ARCHIVE_URL;
+}
+
+std::string AppConfig::profile_folder_url() const
+{
+#if 0   
+    // this code is for debug & testing purposes only - changed url wont get trough inner checks anyway. 
+    auto from_settings = get("profile_folder_url");
+    return from_settings.empty() ? PROFILE_FOLDER_URL : from_settings;
+#endif
+    return PROFILE_FOLDER_URL;
+}
+
+bool AppConfig::exists() const
 {
     return boost::filesystem::exists(config_path());
 }

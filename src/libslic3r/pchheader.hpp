@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Vojtěch Bubník @bubnikv, Roman Beránek @zavorka
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifdef WIN32
 	#ifndef WIN32_LEAN_AND_MEAN
 		#define WIN32_LEAN_AND_MEAN
@@ -87,12 +91,11 @@
 #include <boost/log/expressions.hpp>
 #include <boost/log/trivial.hpp>
 #include <boost/multi_array.hpp>
-#include <boost/nowide/cenv.hpp>
 #include <boost/nowide/convert.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/fstream.hpp>
-#include <boost/nowide/integration/filesystem.hpp>
+#include <boost/nowide/filesystem.hpp>
 #include <boost/nowide/iostream.hpp>
 
 // boost/property_tree/json_parser/detail/parser.hpp includes boost/bind.hpp, which is deprecated.
@@ -107,6 +110,7 @@
 #include <boost/version.hpp>
 
 #include <tbb/parallel_for.h>
+#include <tbb/scalable_allocator.h>
 #include <tbb/spin_mutex.h>
 #include <tbb/task_group.h>
 
@@ -132,7 +136,5 @@
 
 #include "libslic3r.h"
 #include "libslic3r_version.h"
-
-#include <Shiny/Shiny.h>
 
 #include <admesh/stl.h>

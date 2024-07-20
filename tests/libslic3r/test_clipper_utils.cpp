@@ -66,7 +66,7 @@ SCENARIO("Various Clipper operations - xs/t/11_clipper.t", "[ClipperUtils]") {
     GIVEN("polyline") {
         Polyline polyline { { 50, 150 }, { 300, 150 } };
         WHEN("intersection_pl") {
-            Polylines result = Slic3r::intersection_pl({ polyline }, { square, hole_in_square });
+            Polylines result = Slic3r::intersection_pl(polyline, ExPolygon{ square, hole_in_square });
             THEN("correct number of result lines") {
                 REQUIRE(result.size() == 2);
             }
@@ -99,7 +99,7 @@ SCENARIO("Various Clipper operations - xs/t/11_clipper.t", "[ClipperUtils]") {
 			{ 74730000, 74730000 }, { 55270000, 74730000 }, { 55270000, 68063296 }, { 44730000, 68063296 }, { 44730000, 74730000 }, { 25270000, 74730000 }, { 25270000, 55270000 }, { 31936670, 55270000 },
 			{ 31936670, 44730000 }, { 25270000, 44730000 }, { 25270000, 25270000 }, { 44730000, 25270000 }, { 44730000, 31936670 } };
 		Slic3r::Polygon clip { {75200000, 45200000}, {54800000, 45200000}, {54800000, 24800000}, {75200000, 24800000} };
-        Slic3r::Polylines result = Slic3r::intersection_pl(subject, { clip });
+        Slic3r::Polylines result = Slic3r::intersection_pl(subject, ExPolygon{ clip });
 		THEN("intersection_pl - result is not empty") {
 			REQUIRE(result.size() == 1);
 		}
@@ -117,7 +117,7 @@ SCENARIO("Various Clipper operations - xs/t/11_clipper.t", "[ClipperUtils]") {
 	GIVEN("Clipper bug #126") {
 		Slic3r::Polyline subject { { 200000, 19799999 }, { 200000, 200000 }, { 24304692, 200000 }, { 15102879, 17506106 }, { 13883200, 19799999 }, { 200000, 19799999 } };
 		Slic3r::Polygon clip { { 15257205, 18493894 }, { 14350057, 20200000 }, { -200000, 20200000 }, { -200000, -200000 }, { 25196917, -200000 } };
-		Slic3r::Polylines result = Slic3r::intersection_pl(subject, { clip });
+		Slic3r::Polylines result = Slic3r::intersection_pl(subject, ExPolygon{ clip });
 		THEN("intersection_pl - result is not empty") {
 			REQUIRE(result.size() == 1);
 		}
@@ -294,7 +294,7 @@ SCENARIO("Various Clipper operations - t/clipper.t", "[ClipperUtils]") {
     
         WHEN("clipping a line") {
             auto line = Polyline::new_scale({ { 152.742,288.086671142818 }, { 152.742,34.166466971035 } });    
-            Polylines intersection = intersection_pl(line, Polygons{ circle_with_hole });
+            Polylines intersection = intersection_pl(line, to_polygons(circle_with_hole));
             THEN("clipped to two pieces") {
                 REQUIRE(intersection.front().length() == Approx((Vec2d(152742000, 215178843) - Vec2d(152742000, 288086661)).norm()));
                 REQUIRE(intersection[1].length() == Approx((Vec2d(152742000, 35166477) - Vec2d(152742000, 108087507)).norm()));
@@ -308,8 +308,8 @@ SCENARIO("Various Clipper operations - t/clipper.t", "[ClipperUtils]") {
     }
 }
 
-template<e_ordering o = e_ordering::OFF, class P, class Tree> 
-double polytree_area(const Tree &tree, std::vector<P> *out)
+template<e_ordering o = e_ordering::OFF, class P, class P_Alloc, class Tree>
+double polytree_area(const Tree &tree, std::vector<P, P_Alloc> *out)
 {
     traverse_pt<o>(tree, out);
     

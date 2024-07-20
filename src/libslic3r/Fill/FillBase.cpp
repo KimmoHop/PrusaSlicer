@@ -1,3 +1,12 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Tomáš Mészáros @tamasmeszaros, Lukáš Matěna @lukasmatena
+///|/ Copyright (c) SuperSlicer 2018 - 2019 Remi Durand @supermerill
+///|/
+///|/ ported from lib/Slic3r/Fill/Base.pm:
+///|/ Copyright (c) Prusa Research 2016 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include <stdio.h>
 #include <numeric>
 
@@ -20,6 +29,9 @@
 #include "FillRectilinear.hpp"
 #include "FillAdaptive.hpp"
 #include "FillLightning.hpp"
+#include "FillEnsuring.hpp"
+
+#include <boost/log/trivial.hpp>
 
 // #define INFILL_DEBUG_OUTPUT
 
@@ -35,6 +47,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
     case ipRectilinear:         return new FillRectilinear();
     case ipAlignedRectilinear:  return new FillAlignedRectilinear();
     case ipMonotonic:           return new FillMonotonic();
+    case ipMonotonicLines:      return new FillMonotonicLines();
     case ipLine:                return new FillLine();
     case ipGrid:                return new FillGrid();
     case ipTriangles:           return new FillTriangles();
@@ -47,6 +60,7 @@ Fill* Fill::new_from_type(const InfillPattern type)
     case ipSupportCubic:        return new FillAdaptive::Filler();
     case ipSupportBase:         return new FillSupportBase();
     case ipLightning:           return new FillLightning::Filler();
+    case ipEnsuring:            return new FillEnsuring();
     default: throw Slic3r::InvalidArgument("unknown type");
     }
 }
@@ -82,14 +96,20 @@ Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
     // Create the infills for each of the regions.
     Polylines polylines_out;
-    for (size_t i = 0; i < expp.size(); ++ i)
-        _fill_surface_single(
-            params,
-            surface->thickness_layers,
-            _infill_direction(surface),
-            std::move(expp[i]),
-            polylines_out);
+    for (ExPolygon &expoly : expp)
+        _fill_surface_single(params, surface->thickness_layers, _infill_direction(surface), std::move(expoly), polylines_out);
     return polylines_out;
+}
+
+ThickPolylines Fill::fill_surface_arachne(const Surface *surface, const FillParams &params)
+{
+    // Perform offset.
+    Slic3r::ExPolygons expp = offset_ex(surface->expolygon, float(scale_(this->overlap - 0.5 * this->spacing)));
+    // Create the infills for each of the regions.
+    ThickPolylines thick_polylines_out;
+    for (ExPolygon &expoly : expp)
+        _fill_surface_single(params, surface->thickness_layers, _infill_direction(surface), std::move(expoly), thick_polylines_out);
+    return thick_polylines_out;
 }
 
 // Calculate a new spacing to fill width with possibly integer number of lines,
@@ -123,8 +143,8 @@ std::pair<float, Point> Fill::_infill_direction(const Surface *surface) const
     float out_angle = this->angle;
 
 	if (out_angle == FLT_MAX) {
-		//FIXME Vojtech: Add a warning?
-        printf("Using undefined infill angle\n");
+        assert(false);
+        BOOST_LOG_TRIVIAL(error) << "Using undefined infill angle";
         out_angle = 0.f;
     }
 

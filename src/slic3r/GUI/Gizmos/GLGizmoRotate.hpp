@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Oleksandra Iushchenko @YuSanka, Filip Sykala @Jony01, Tomáš Mészáros @tamasmeszaros
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLGizmoRotate_hpp_
 #define slic3r_GLGizmoRotate_hpp_
 
@@ -6,6 +10,7 @@
 namespace Slic3r {
 namespace GUI {
 class Selection;
+
 class GLGizmoRotate : public GLGizmoBase
 {
     static const float Offset;
@@ -34,15 +39,9 @@ private:
     float m_snap_coarse_out_radius{ 0.0f };
     float m_snap_fine_in_radius{ 0.0f };
     float m_snap_fine_out_radius{ 0.0f };
-#if ENABLE_WORLD_COORDINATE
     BoundingBoxf3 m_bounding_box;
     Transform3d m_orient_matrix{ Transform3d::Identity() };
-#endif // ENABLE_WORLD_COORDINATE
 
-#if !ENABLE_GIZMO_GRABBER_REFACTOR
-    GLModel m_cone;
-#endif // !ENABLE_GIZMO_GRABBER_REFACTOR
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     GLModel m_circle;
     GLModel m_scale;
     GLModel m_snap_radii;
@@ -57,7 +56,9 @@ private:
     float m_old_radius{ 0.0f };
     float m_old_hover_radius{ 0.0f };
     float m_old_angle{ 0.0f };
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
+
+    // emboss need to draw rotation gizmo in local coordinate systems
+    bool m_force_local_coordinate{ false };
 
     ColorRGBA m_drag_color;
     ColorRGBA m_highlight_color;
@@ -70,6 +71,9 @@ public:
     void set_angle(double angle);
 
     std::string get_tooltip() const override;
+
+    void set_group_id(int group_id) { m_group_id = group_id; }
+    void set_force_local_coordinate(bool use) { m_force_local_coordinate = use; }
 
     void start_dragging();
     void stop_dragging();
@@ -87,46 +91,29 @@ public:
     /// <returns>Return True when use the information otherwise False.</returns>
     bool on_mouse(const wxMouseEvent &mouse_event) override;
     void dragging(const UpdateData &data);
+
 protected:
     bool on_init() override;
     std::string on_get_name() const override { return ""; }
     void on_start_dragging() override;
     void on_dragging(const UpdateData &data) override;
     void on_render() override;
-    void on_render_for_picking() override;
 
 private:
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     void render_circle(const ColorRGBA& color, bool radius_changed);
     void render_scale(const ColorRGBA& color, bool radius_changed);
     void render_snap_radii(const ColorRGBA& color, bool radius_changed);
     void render_reference_radius(const ColorRGBA& color, bool radius_changed);
     void render_angle_arc(const ColorRGBA& color, bool radius_changed);
     void render_grabber_connection(const ColorRGBA& color, bool radius_changed);
-#else
-    void render_circle() const;
-    void render_scale() const;
-    void render_snap_radii() const;
-    void render_reference_radius() const;
-    void render_angle() const;
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
     void render_grabber(const BoundingBoxf3& box);
-#if !ENABLE_GIZMO_GRABBER_REFACTOR
-    void render_grabber_extension(const BoundingBoxf3& box, bool picking);
-#endif // !ENABLE_GIZMO_GRABBER_REFACTOR
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     Transform3d local_transform(const Selection& selection) const;
-#else
-    void transform_to_local(const Selection& selection) const;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
     // returns the intersection of the mouse ray with the plane perpendicular to the gizmo axis, in local coordinate
-    Vec3d mouse_position_in_local_plane(const Linef3& mouse_ray, const Selection& selection) const;
+    Vec3d mouse_position_in_local_plane(const Linef3& mouse_ray) const;
 
-#if ENABLE_WORLD_COORDINATE
     void init_data_from_selection(const Selection& selection);
-#endif // ENABLE_WORLD_COORDINATE
 };
 
 class GLGizmoRotate3D : public GLGizmoBase
@@ -155,7 +142,7 @@ public:
     /// <returns>Return True when use the information otherwise False.</returns>
     bool on_mouse(const wxMouseEvent &mouse_event) override;
 
-    void data_changed() override;
+    void data_changed(bool is_serializing) override;
 protected:
     bool on_init() override;
     std::string on_get_name() const override;
@@ -181,11 +168,8 @@ protected:
     void on_dragging(const UpdateData &data) override;
         
     void on_render() override;
-    void on_render_for_picking() override {
-        for (GLGizmoRotate& g : m_gizmos) {
-            g.render_for_picking();
-        }
-    }
+    virtual void on_register_raycasters_for_picking() override;
+    virtual void on_unregister_raycasters_for_picking() override;
 
     void on_render_input_window(float x, float y, float bottom_limit) override;
 
@@ -193,8 +177,6 @@ private:
 
     class RotoptimzeWindow
     {
-        ImGuiWrapper *m_imgui = nullptr;
-
     public:
         struct State {
             float  accuracy  = 1.f;

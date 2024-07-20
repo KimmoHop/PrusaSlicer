@@ -1,7 +1,13 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Oleksandra Iushchenko @YuSanka, Lukáš Matěna @lukasmatena, Enrico Turri @enricoturri1966, Filip Sykala @Jony01, Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLGizmoMmuSegmentation_hpp_
 #define slic3r_GLGizmoMmuSegmentation_hpp_
 
 #include "GLGizmoPainterBase.hpp"
+
+#include "slic3r/GUI/I18N.hpp"
 
 namespace Slic3r::GUI {
 
@@ -55,24 +61,21 @@ public:
 
     // IDs of the Vertex Array Objects, into which the geometry has been loaded.
     // Zero if the VBOs are not sent to GPU yet.
-    unsigned int              vertices_VBO_id{0};
+    unsigned int              vertices_VAO_id{ 0 };
+    unsigned int              vertices_VBO_id{ 0 };
     std::vector<unsigned int> triangle_indices_VBO_ids;
 };
 
 class TriangleSelectorMmGui : public TriangleSelectorGUI {
 public:
+    TriangleSelectorMmGui() = delete;
     // Plus 1 in the initialization of m_gizmo_scene is because the first position is allocated for non-painted triangles, and the indices above colors.size() are allocated for seed fill.
-    TriangleSelectorMmGui(const TriangleMesh& mesh, const std::vector<ColorRGBA>& colors, const ColorRGBA& default_volume_color)
+    explicit TriangleSelectorMmGui(const TriangleMesh& mesh, const std::vector<ColorRGBA>& colors, const ColorRGBA& default_volume_color)
         : TriangleSelectorGUI(mesh), m_colors(colors), m_default_volume_color(default_volume_color), m_gizmo_scene(2 * (colors.size() + 1)) {}
+
     ~TriangleSelectorMmGui() override = default;
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     void render(ImGuiWrapper* imgui, const Transform3d& matrix) override;
-#else
-    // Render current selection. Transformation matrices are supposed
-    // to be already set.
-    void render(ImGuiWrapper* imgui) override;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
 private:
     void update_render_data();
@@ -91,7 +94,7 @@ public:
 
     void render_painter_gizmo() override;
 
-    void data_changed() override;
+    void data_changed(bool is_serializing) override;
 
     void render_triangles(const Selection& selection) const override;
 
@@ -107,8 +110,8 @@ protected:
     ColorRGBA get_cursor_sphere_left_button_color() const override;
     ColorRGBA get_cursor_sphere_right_button_color() const override;
 
-    EnforcerBlockerType get_left_button_state_type() const override { return EnforcerBlockerType(m_first_selected_extruder_idx + 1); }
-    EnforcerBlockerType get_right_button_state_type() const override { return EnforcerBlockerType(m_second_selected_extruder_idx + 1); }
+    TriangleStateType get_left_button_state_type() const override { return TriangleStateType(m_first_selected_extruder_idx + 1); }
+    TriangleStateType get_right_button_state_type() const override { return TriangleStateType(m_second_selected_extruder_idx + 1); }
 
     void on_render_input_window(float x, float y, float bottom_limit) override;
     std::string on_get_name() const override;
@@ -120,7 +123,7 @@ protected:
 
     std::string get_gizmo_entering_text() const override { return _u8L("Entering Multimaterial painting"); }
     std::string get_gizmo_leaving_text() const override { return _u8L("Leaving Multimaterial painting"); }
-    std::string get_action_snapshot_name() override { return _u8L("Multimaterial painting editing"); }
+    std::string get_action_snapshot_name() const override { return _u8L("Multimaterial painting editing"); }
 
     size_t                            m_first_selected_extruder_idx  = 0;
     size_t                            m_second_selected_extruder_idx = 1;
@@ -146,7 +149,7 @@ private:
 
     // This map holds all translated description texts, so they can be easily referenced during layout calculations
     // etc. When language changes, GUI is recreated and this class constructed again, so the change takes effect.
-    std::map<std::string, wxString> m_desc;
+    std::map<std::string, std::string> m_desc;
 };
 
 } // namespace Slic3r

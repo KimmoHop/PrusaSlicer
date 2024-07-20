@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2021 - 2022 Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_BuildVolume_hpp_
 #define slic3r_BuildVolume_hpp_
 
@@ -91,14 +95,9 @@ public:
     // Called on final G-code paths.
     //FIXME The test does not take the thickness of the extrudates into account!
     bool         all_paths_inside(const GCodeProcessorResult& paths, const BoundingBoxf3& paths_bbox, bool ignore_bottom = true) const;
-    // Called on initial G-code preview on OpenGL vertex buffer interleaved normals and vertices.
-    bool         all_paths_inside_vertices_and_normals_interleaved(const std::vector<float>& paths, const Eigen::AlignedBox<float, 3>& bbox, bool ignore_bottom = true) const;
 
-
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     const std::pair<std::vector<Vec2d>, std::vector<Vec2d>>& top_bottom_convex_hull_decomposition_scene() const { return m_top_bottom_convex_hull_decomposition_scene; }
     const std::pair<std::vector<Vec2d>, std::vector<Vec2d>>& top_bottom_convex_hull_decomposition_bed() const { return m_top_bottom_convex_hull_decomposition_bed; }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 private:
     // Source definition of the print bed geometry (PrintConfig::bed_shape)

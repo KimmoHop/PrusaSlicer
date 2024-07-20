@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Lukáš Matěna @lukasmatena, Oleksandra Iushchenko @YuSanka, Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "GUI_ObjectLayers.hpp"
 #include "GUI_ObjectList.hpp"
 
@@ -234,47 +238,47 @@ void ObjectLayers::UpdateAndShow(const bool show)
 
 void ObjectLayers::msw_rescale()
 {
-    m_bmp_delete.msw_rescale();
-    m_bmp_add.msw_rescale();
+    //m_bmp_delete.msw_rescale();
+    //m_bmp_add.msw_rescale();
 
-    m_grid_sizer->SetHGap(wxGetApp().em_unit());
+    //m_grid_sizer->SetHGap(wxGetApp().em_unit());
 
-    // rescale edit-boxes
-    const int cells_cnt = m_grid_sizer->GetCols() * m_grid_sizer->GetEffectiveRowsCount();
-    for (int i = 0; i < cells_cnt; ++i) {
-        const wxSizerItem* item = m_grid_sizer->GetItem(i);
-        if (item->IsWindow()) {
-            LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(item->GetWindow());
-            if (editor != nullptr)
-                editor->msw_rescale();
-        }
-        else if (item->IsSizer()) // case when we have editor with buttons
-        {
-            wxSizerItem* e_item = item->GetSizer()->GetItem(size_t(0)); // editor
-            if (e_item->IsWindow()) {
-                LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(e_item->GetWindow());
-                if (editor != nullptr)
-                    editor->msw_rescale();
-            }
+    //// rescale edit-boxes
+    //const int cells_cnt = m_grid_sizer->GetCols() * m_grid_sizer->GetEffectiveRowsCount();
+    //for (int i = 0; i < cells_cnt; ++i) {
+    //    const wxSizerItem* item = m_grid_sizer->GetItem(i);
+    //    if (item->IsWindow()) {
+    //        LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(item->GetWindow());
+    //        if (editor != nullptr)
+    //            editor->msw_rescale();
+    //    }
+    //    else if (item->IsSizer()) // case when we have editor with buttons
+    //    {
+    //        wxSizerItem* e_item = item->GetSizer()->GetItem(size_t(0)); // editor
+    //        if (e_item->IsWindow()) {
+    //            LayerRangeEditor* editor = dynamic_cast<LayerRangeEditor*>(e_item->GetWindow());
+    //            if (editor != nullptr)
+    //                editor->msw_rescale();
+    //        }
 
-            if (item->GetSizer()->GetItemCount() > 2) // if there are Add/Del buttons
-                for (size_t btn : {2, 3}) { // del_btn, add_btn
-                    wxSizerItem* b_item = item->GetSizer()->GetItem(btn);
-                    if (b_item->IsWindow()) {
-                        auto button = dynamic_cast<PlusMinusButton*>(b_item->GetWindow());
-                        if (button != nullptr)
-                            button->msw_rescale();
-                    }
-                }
-        }
-    }
+    //        if (item->GetSizer()->GetItemCount() > 2) // if there are Add/Del buttons
+    //            for (size_t btn : {2, 3}) { // del_btn, add_btn
+    //                wxSizerItem* b_item = item->GetSizer()->GetItem(btn);
+    //                if (b_item->IsWindow()) {
+    //                    auto button = dynamic_cast<PlusMinusButton*>(b_item->GetWindow());
+    //                    if (button != nullptr)
+    //                        button->msw_rescale();
+    //                }
+    //            }
+    //    }
+    //}
     m_grid_sizer->Layout();
 }
 
 void ObjectLayers::sys_color_changed()
 {
-    m_bmp_delete.msw_rescale();
-    m_bmp_add.msw_rescale();
+    m_bmp_delete.sys_color_changed();
+    m_bmp_add.sys_color_changed();
 
     // rescale edit-boxes
     const int cells_cnt = m_grid_sizer->GetCols() * m_grid_sizer->GetEffectiveRowsCount();
@@ -283,10 +287,10 @@ void ObjectLayers::sys_color_changed()
         if (item->IsSizer()) {// case when we have editor with buttons
             for (size_t btn : {2, 3}) { // del_btn, add_btn
                 wxSizerItem* b_item = item->GetSizer()->GetItem(btn);
-                if (b_item->IsWindow()) {
+                if (b_item && b_item->IsWindow()) {
                     auto button = dynamic_cast<PlusMinusButton*>(b_item->GetWindow());
                     if (button != nullptr)
-                        button->msw_rescale();
+                        button->sys_color_changed();
                 }
             }
         }
@@ -342,18 +346,26 @@ LayerRangeEditor::LayerRangeEditor( ObjectLayers* parent,
     this->Bind(wxEVT_TEXT_ENTER, [this, edit_fn](wxEvent&)
     {
         m_enter_pressed     = true;
-        // If LayersList wasn't updated/recreated, we can call wxEVT_KILL_FOCUS.Skip()
-        if (m_type&etLayerHeight) {
-            if (!edit_fn(get_value(), true, false))
+        // Workaround! Under Linux we have to use CallAfter() to avoid crash after pressing ENTER key
+        // see #7531, #8055, #8408
+#ifdef __linux__
+        wxTheApp->CallAfter([this, edit_fn]() {
+#endif
+            // If LayersList wasn't updated/recreated, we can call wxEVT_KILL_FOCUS.Skip()
+            if (m_type & etLayerHeight) {
+                if (!edit_fn(get_value(), true, false))
+                    SetValue(m_valid_value);
+                else
+                    m_valid_value = double_to_string(get_value());
+                m_call_kill_focus = true;
+            }
+            else if (!edit_fn(get_value(), true, false)) {
                 SetValue(m_valid_value);
-            else
-                m_valid_value = double_to_string(get_value());
-            m_call_kill_focus = true;
-        }
-        else if (!edit_fn(get_value(), true, false)) {
-            SetValue(m_valid_value);
-            m_call_kill_focus = true;
-        }
+                m_call_kill_focus = true;
+            }
+#ifdef __linux__
+        });
+#endif 
     }, this->GetId());
 
     this->Bind(wxEVT_KILL_FOCUS, [this, edit_fn](wxFocusEvent& e)
@@ -419,16 +431,13 @@ coordf_t LayerRangeEditor::get_value()
     const char dec_sep = is_decimal_separator_point() ? '.' : ',';
     const char dec_sep_alt = dec_sep == '.' ? ',' : '.';
     // Replace the first incorrect separator in decimal number.
-    if (str.Replace(dec_sep_alt, dec_sep, false) != 0)
-        SetValue(str);
+    str.Replace(dec_sep_alt, dec_sep, false);
 
     if (str == ".")
         layer_height = 0.0;
-    else {
-        if (!str.ToDouble(&layer_height) || layer_height < 0.0f) {
-            show_error(m_parent, _L("Invalid numeric input."));
-            SetValue(double_to_string(layer_height));
-        }
+    else if (!str.ToDouble(&layer_height) || layer_height < 0.0f) {
+        show_error(m_parent, _L("Invalid numeric input."));
+        assert(m_valid_value.ToDouble(&layer_height));
     }
 
     return layer_height;

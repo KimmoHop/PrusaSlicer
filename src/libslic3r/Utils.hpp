@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Filip Sykala @Jony01, David Kocík @kocikdav, Enrico Turri @enricoturri1966, Tomáš Mészáros @tamasmeszaros, Lukáš Matěna @lukasmatena, Vojtěch Král @vojtechkral
+///|/ Copyright (c) 2019 Sijmen Schoon
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_Utils_hpp_
 #define slic3r_Utils_hpp_
 
@@ -16,15 +21,17 @@ namespace boost { namespace filesystem { class directory_entry; }}
 
 namespace Slic3r {
 
+inline std::optional<std::size_t> thread_count;
 extern void set_logging_level(unsigned int level);
 extern unsigned get_logging_level();
 // Format memory allocated, separate thousands by comma.
 extern std::string format_memsize_MB(size_t n);
+extern std::string format_memsize(size_t bytes, unsigned int decimals = 1);
 // Return string to be added to the boost::log output to inform about the current process memory allocation.
 // The string is non-empty if the loglevel >= info (3) or ignore_loglevel==true.
 // Latter is used to get the memory info from SysInfoDialog.
 extern std::string log_memory_info(bool ignore_loglevel = false);
-extern void disable_multi_threading();
+extern void enforce_thread_count(std::size_t count);
 // Returns the size of physical memory (RAM) in bytes.
 extern size_t total_physical_memory();
 
@@ -53,6 +60,11 @@ const std::string& sys_shapes_dir();
 // Return a full path to the custom shapes gallery directory.
 std::string custom_shapes_dir();
 
+// Set a path with shapes gallery files.
+void set_custom_gcodes_dir(const std::string &path);
+// Return a full path to the system shapes gallery directory.
+const std::string& custom_gcodes_dir();
+
 // Set a path with preset files.
 void set_data_dir(const std::string &path);
 // Return a full path to the GUI resource files.
@@ -62,10 +74,6 @@ const std::string& data_dir();
 // Writes out the output path prefix to the console for the first time the function is called,
 // so the user knows where to search for the debugging output.
 std::string debug_out_path(const char *name, ...);
-
-// A special type for strings encoded in the local Windows 8-bit code page.
-// This type is only needed for Perl bindings to relay to Perl that the string is raw, not UTF-8 encoded.
-typedef std::string local_encoded_string;
 
 // Returns next utf8 sequence length. =number of bytes in string, that creates together one utf-8 character. 
 // Starting at pos. ASCII characters returns 1. Works also if pos is in the middle of the sequence.
@@ -176,6 +184,21 @@ template<class T> size_t next_highest_power_of_2(T v,
     return next_highest_power_of_2(uint32_t(v));
 }
 
+template<class VectorType> void reserve_power_of_2(VectorType &vector, size_t n)
+{
+    vector.reserve(next_highest_power_of_2(n));
+}
+
+template<class VectorType> void reserve_more(VectorType &vector, size_t n)
+{
+    vector.reserve(vector.size() + n);
+}
+
+template<class VectorType> void reserve_more_power_of_2(VectorType &vector, size_t n)
+{
+    vector.reserve(next_highest_power_of_2(vector.size() + n));
+}
+
 template<typename INDEX_TYPE>
 inline INDEX_TYPE prev_idx_modulo(INDEX_TYPE idx, const INDEX_TYPE count)
 {
@@ -190,6 +213,14 @@ inline INDEX_TYPE next_idx_modulo(INDEX_TYPE idx, const INDEX_TYPE count)
 	if (++ idx == count)
 		idx = 0;
 	return idx;
+}
+
+
+// Return dividend divided by divisor rounded to the nearest integer
+template<typename INDEX_TYPE>
+inline INDEX_TYPE round_up_divide(const INDEX_TYPE dividend, const INDEX_TYPE divisor)
+{
+    return (dividend + divisor - 1) / divisor;
 }
 
 template<typename CONTAINER_TYPE>
@@ -229,6 +260,7 @@ inline typename CONTAINER_TYPE::value_type& next_value_modulo(typename CONTAINER
 }
 
 extern std::string xml_escape(std::string text, bool is_marked = false);
+extern std::string xml_escape_double_quotes_attribute_value(std::string text);
 
 
 #if defined __GNUC__ && __GNUC__ < 5 && !defined __clang__
@@ -258,8 +290,6 @@ class ScopeGuard
 {
 public:
     typedef std::function<void()> Closure;
-private:
-//    bool committed;
     Closure closure;
 
 public:
@@ -285,43 +315,9 @@ public:
 
 // Shorten the dhms time by removing the seconds, rounding the dhm to full minutes
 // and removing spaces.
-inline std::string short_time(const std::string &time)
-{
-    // Parse the dhms time format.
-    int days = 0;
-    int hours = 0;
-    int minutes = 0;
-    int seconds = 0;
-    if (time.find('d') != std::string::npos)
-        ::sscanf(time.c_str(), "%dd %dh %dm %ds", &days, &hours, &minutes, &seconds);
-    else if (time.find('h') != std::string::npos)
-        ::sscanf(time.c_str(), "%dh %dm %ds", &hours, &minutes, &seconds);
-    else if (time.find('m') != std::string::npos)
-        ::sscanf(time.c_str(), "%dm %ds", &minutes, &seconds);
-    else if (time.find('s') != std::string::npos)
-        ::sscanf(time.c_str(), "%ds", &seconds);
-    // Round to full minutes.
-    if (days + hours + minutes > 0 && seconds >= 30) {
-        if (++minutes == 60) {
-            minutes = 0;
-            if (++hours == 24) {
-                hours = 0;
-                ++days;
-            }
-        }
-    }
-    // Format the dhm time.
-    char buffer[64];
-    if (days > 0)
-        ::sprintf(buffer, "%dd%dh%dm", days, hours, minutes);
-    else if (hours > 0)
-        ::sprintf(buffer, "%dh%dm", hours, minutes);
-    else if (minutes > 0)
-        ::sprintf(buffer, "%dm", minutes);
-    else
-        ::sprintf(buffer, "%ds", seconds);
-    return buffer;
-}
+std::string short_time(const std::string& time, bool force_localization = false);
+// localized short_time used on UI
+inline std::string short_time_ui(const std::string& time) { return short_time(time, true); }
 
 // Returns the given time is seconds in format DDd HHh MMm SSs
 inline std::string get_time_dhms(float time_in_secs)

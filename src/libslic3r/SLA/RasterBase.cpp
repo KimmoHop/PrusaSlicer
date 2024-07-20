@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2020 - 2022 Tomáš Mészáros @tamasmeszaros
+///|/ Copyright (c) 2022 ole00 @ole00
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef SLARASTER_CPP
 #define SLARASTER_CPP
 
@@ -10,11 +15,6 @@
 #include <miniz.h>
 
 namespace Slic3r { namespace sla {
-
-const RasterBase::TMirroring RasterBase::NoMirror = {false, false};
-const RasterBase::TMirroring RasterBase::MirrorX  = {true, false};
-const RasterBase::TMirroring RasterBase::MirrorY  = {false, true};
-const RasterBase::TMirroring RasterBase::MirrorXY = {true, true};
 
 EncodedRaster PNGRasterEncoder::operator()(const void *ptr, size_t w, size_t h,
                                            size_t      num_components)

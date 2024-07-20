@@ -1,10 +1,12 @@
+///|/ Copyright (c) Prusa Research 2019 - 2022 Enrico Turri @enricoturri1966, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLSelectionRectangle_hpp_
 #define slic3r_GLSelectionRectangle_hpp_
 
 #include "libslic3r/Point.hpp"
-#if ENABLE_LEGACY_OPENGL_REMOVAL
 #include "GLModel.hpp"
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
 namespace Slic3r {
 namespace GUI {
@@ -27,8 +29,8 @@ public:
     void dragging(const Vec2d& mouse_position);
 
     // Given a vector of points in world coordinates, the function returns indices of those
-    // that are in the rectangle. It then disables the rectangle.
-    std::vector<unsigned int> stop_dragging(const GLCanvas3D& canvas, const std::vector<Vec3d>& points);
+    // that are in the rectangle.
+    std::vector<unsigned int> contains(const std::vector<Vec3d>& points) const;
 
     // Disables the rectangle.
     void stop_dragging();
@@ -36,9 +38,7 @@ public:
     void render(const GLCanvas3D& canvas);
 
     bool is_dragging() const { return m_state != EState::Off; }
-#if ENABLE_NEW_RECTANGLE_SELECTION
     bool is_empty() const    { return m_state == EState::Off || m_start_corner.isApprox(m_end_corner); }
-#endif // ENABLE_NEW_RECTANGLE_SELECTION
 
     EState get_state() const { return m_state; }
 
@@ -53,11 +53,9 @@ private:
     EState m_state{ EState::Off };
     Vec2d m_start_corner{ Vec2d::Zero() };
     Vec2d m_end_corner{ Vec2d::Zero() };
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     GLModel m_rectangle;
     Vec2d m_old_start_corner{ Vec2d::Zero() };
     Vec2d m_old_end_corner{ Vec2d::Zero() };
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 };
 
     

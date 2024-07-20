@@ -20,11 +20,11 @@ SCENARIO("PrintObject: Perimeter generation", "[PrintObject]") {
             }
             THEN("Every layer in region 0 has 1 island of perimeters") {
                 for (const Layer *layer : object.layers())
-                    REQUIRE(layer->regions().front()->perimeters.entities.size() == 1);
+                    REQUIRE(layer->regions().front()->perimeters().size() == 1);
             }
             THEN("Every layer in region 0 has 3 paths in its perimeters list.") {
                 for (const Layer *layer : object.layers())
-                    REQUIRE(layer->regions().front()->perimeters.items_count() == 3);
+                    REQUIRE(layer->regions().front()->perimeters().items_count() == 3);
             }
         }
     }
@@ -62,11 +62,11 @@ SCENARIO("Print: Changing number of solid surfaces does not cause all surfaces t
         // Precondition: Ensure that the model has 2 solid top layers (39, 38)
         // and one solid bottom layer (0).
 		auto test_is_solid_infill = [&print](size_t obj_id, size_t layer_id) {
-		    const Layer &layer = *(print.objects().at(obj_id)->get_layer((int)layer_id));
+		    const Layer &layer = *print.objects()[obj_id]->get_layer((int)layer_id);
 		    // iterate over all of the regions in the layer
 		    for (const LayerRegion *region : layer.regions()) {
 		        // for each region, iterate over the fill surfaces
-		        for (const Surface &surface : region->fill_surfaces.surfaces)
+		        for (const Surface &surface : region->fill_surfaces())
 		            CHECK(surface.is_solid());
 		    }
 		};

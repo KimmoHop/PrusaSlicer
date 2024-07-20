@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2023 Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv, Enrico Turri @enricoturri1966, Filip Sykala @Jony01, Lukáš Matěna @lukasmatena
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/AppConfig.hpp"
 
@@ -36,10 +40,8 @@ void Camera::set_type(EType type)
 {
     if (m_type != type && (type == EType::Ortho || type == EType::Perspective)) {
         m_type = type;
-        if (m_update_config_on_type_change_enabled) {
+        if (m_update_config_on_type_change_enabled)
             wxGetApp().app_config->set("use_perspective_camera", (m_type == EType::Perspective) ? "1" : "0");
-            wxGetApp().app_config->save();
-        }
     }
 }
 
@@ -91,6 +93,78 @@ void Camera::select_view(const std::string& direction)
         look_at(m_target + m_distance * Vec3d::UnitY(), m_target, Vec3d::UnitZ());
 }
 
+double Camera::get_near_left() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return m_frustrum_zs.first * (m_projection_matrix.matrix()(0, 2) - 1.0) / m_projection_matrix.matrix()(0, 0);
+    default:
+    case EType::Ortho:
+        return -1.0 / m_projection_matrix.matrix()(0, 0) - 0.5 * m_projection_matrix.matrix()(0, 0) * m_projection_matrix.matrix()(0, 3);
+    }
+}
+
+double Camera::get_near_right() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return m_frustrum_zs.first * (m_projection_matrix.matrix()(0, 2) + 1.0) / m_projection_matrix.matrix()(0, 0);
+    default:
+    case EType::Ortho:
+        return 1.0 / m_projection_matrix.matrix()(0, 0) - 0.5 * m_projection_matrix.matrix()(0, 0) * m_projection_matrix.matrix()(0, 3);
+    }
+}
+
+double Camera::get_near_top() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return m_frustrum_zs.first * (m_projection_matrix.matrix()(1, 2) + 1.0) / m_projection_matrix.matrix()(1, 1);
+    default:
+    case EType::Ortho:
+        return 1.0 / m_projection_matrix.matrix()(1, 1) - 0.5 * m_projection_matrix.matrix()(1, 1) * m_projection_matrix.matrix()(1, 3);
+    }
+}
+
+double Camera::get_near_bottom() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return m_frustrum_zs.first * (m_projection_matrix.matrix()(1, 2) - 1.0) / m_projection_matrix.matrix()(1, 1);
+    default:
+    case EType::Ortho:
+        return -1.0 / m_projection_matrix.matrix()(1, 1) - 0.5 * m_projection_matrix.matrix()(1, 1) * m_projection_matrix.matrix()(1, 3);
+    }
+}
+
+double Camera::get_near_width() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return 2.0 * m_frustrum_zs.first / m_projection_matrix.matrix()(0, 0);
+    default:
+    case EType::Ortho:
+        return 2.0 / m_projection_matrix.matrix()(0, 0);
+    }
+}
+
+double Camera::get_near_height() const
+{
+    switch (m_type)
+    {
+    case EType::Perspective:
+        return 2.0 * m_frustrum_zs.first / m_projection_matrix.matrix()(1, 1);
+    default:
+    case EType::Ortho:
+        return 2.0 / m_projection_matrix.matrix()(1, 1);
+    }
+}
+
 double Camera::get_fov() const
 {
     switch (m_type)
@@ -103,39 +177,22 @@ double Camera::get_fov() const
     };
 }
 
-void Camera::apply_viewport(int x, int y, unsigned int w, unsigned int h)
+void Camera::set_viewport(int x, int y, unsigned int w, unsigned int h)
 {
-    glsafe(::glViewport(0, 0, w, h));
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     m_viewport = { 0, 0, int(w), int(h) };
-#else
-    glsafe(::glGetIntegerv(GL_VIEWPORT, m_viewport.data()));
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 
-#if !ENABLE_LEGACY_OPENGL_REMOVAL
-void Camera::apply_view_matrix()
+void Camera::apply_viewport() const
 {
-    glsafe(::glMatrixMode(GL_MODELVIEW));
-    glsafe(::glLoadIdentity());
-    glsafe(::glMultMatrixd(m_view_matrix.data()));
+    glsafe(::glViewport(m_viewport[0], m_viewport[1], m_viewport[2], m_viewport[3]));
 }
-#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
 void Camera::apply_projection(const BoundingBoxf3& box, double near_z, double far_z)
 {
     double w = 0.0;
     double h = 0.0;
 
-#if !ENABLE_LEGACY_OPENGL_REMOVAL
-    const double old_distance = m_distance;
-#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
     m_frustrum_zs = calc_tight_frustrum_zs_around(box);
-#if !ENABLE_LEGACY_OPENGL_REMOVAL
-    if (m_distance != old_distance)
-        // the camera has been moved re-apply view matrix
-        apply_view_matrix();
-#endif // !ENABLE_LEGACY_OPENGL_REMOVAL
 
     if (near_z > 0.0)
         m_frustrum_zs.first = std::max(std::min(m_frustrum_zs.first, near_z), FrustrumMinNearZ);
@@ -169,56 +226,36 @@ void Camera::apply_projection(const BoundingBoxf3& box, double near_z, double fa
     }
     }
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
-    switch (m_type)
-    {
-    default:
-    case EType::Ortho:
-    {
-        const double dz = m_frustrum_zs.second - m_frustrum_zs.first;
-        const double zz = m_frustrum_zs.first + m_frustrum_zs.second;
-        m_projection_matrix.matrix() << 1.0 / w,     0.0,       0.0,      0.0,
-                                            0.0, 1.0 / h,       0.0,      0.0,
-                                            0.0,     0.0, -2.0 / dz, -zz / dz,
-                                            0.0,     0.0,       0.0,      1.0;
-        break;
-    }
-    case EType::Perspective:
-    {
-        const double n = m_frustrum_zs.first;
-        const double f = m_frustrum_zs.second;
-        const double dz = f - n;
-        const double zz = n + f;
-        const double fn = n * f;
-        m_projection_matrix.matrix() << n / w,   0.0,      0.0,            0.0,
-                                          0.0, n / h,      0.0,            0.0,
-                                          0.0,   0.0, -zz / dz, -2.0 * fn / dz,
-                                          0.0,   0.0,     -1.0,            0.0;
-        break;
-    }
-    }
-#else
-    glsafe(::glMatrixMode(GL_PROJECTION));
-    glsafe(::glLoadIdentity());
+    apply_projection(-w, w, -h, h, m_frustrum_zs.first, m_frustrum_zs.second);
+}
+
+void Camera::apply_projection(double left, double right, double bottom, double top, double near_z, double far_z)
+{
+    assert(left != right && bottom != top && near_z != far_z);
+    const double inv_dx = 1.0 / (right - left);
+    const double inv_dy = 1.0 / (top - bottom);
+    const double inv_dz = 1.0 / (far_z - near_z);
 
     switch (m_type)
     {
     default:
     case EType::Ortho:
     {
-        glsafe(::glOrtho(-w, w, -h, h, m_frustrum_zs.first, m_frustrum_zs.second));
+        m_projection_matrix.matrix() << 2.0 * inv_dx,          0.0,           0.0,   -(left + right) * inv_dx,
+                                                 0.0, 2.0 * inv_dy,           0.0,   -(bottom + top) * inv_dy,
+                                                 0.0,          0.0, -2.0 * inv_dz, -(near_z + far_z) * inv_dz,
+                                                 0.0,          0.0,           0.0,                        1.0;
         break;
     }
     case EType::Perspective:
     {
-        glsafe(::glFrustum(-w, w, -h, h, m_frustrum_zs.first, m_frustrum_zs.second));
+        m_projection_matrix.matrix() << 2.0 * near_z * inv_dx,                   0.0,    (left + right) * inv_dx,                            0.0,
+                                                          0.0, 2.0 * near_z * inv_dy,    (bottom + top) * inv_dy,                            0.0,
+                                                          0.0,                   0.0, -(near_z + far_z) * inv_dz, -2.0 * near_z * far_z * inv_dz,
+                                                          0.0,                   0.0,                       -1.0,                            0.0;
         break;
     }
     }
-
-    glsafe(::glGetDoublev(GL_PROJECTION_MATRIX, m_projection_matrix.data()));
-    glsafe(::glMatrixMode(GL_MODELVIEW));
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 }
 
 void Camera::zoom_to_box(const BoundingBoxf3& box, double margin_factor)
@@ -250,7 +287,7 @@ void Camera::debug_render() const
     imgui.begin(std::string("Camera statistics"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse);
 
     std::string type = get_type_as_string();
-    if (wxGetApp().plater()->get_mouse3d_controller().connected() || (wxGetApp().app_config->get("use_free_camera") == "1"))
+    if (wxGetApp().plater()->get_mouse3d_controller().connected() || (wxGetApp().app_config->get_bool("use_free_camera")))
         type += "/free";
     else
         type += "/constrained";
@@ -336,6 +373,8 @@ std::pair<double, double> Camera::calc_tight_frustrum_zs_around(const BoundingBo
     std::pair<double, double> ret;
     auto& [near_z, far_z] = ret;
 
+    set_distance(DefaultDistance);
+
     // box in eye space
     const BoundingBoxf3 eye_box = box.transformed(m_view_matrix);
     near_z = -eye_box.max.z();
@@ -359,15 +398,6 @@ std::pair<double, double> Camera::calc_tight_frustrum_zs_around(const BoundingBo
         near_z += delta;
         far_z += delta;
     }
-// The following is commented out because it causes flickering of the 3D scene GUI
-// when the bounding box of the scene gets large enough
-// We need to introduce some smarter code to move the camera back and forth in such case
-//    else if (near_z > 2.0 * FrustrumMinNearZ && m_distance > DefaultDistance) {
-//        float delta = m_distance - DefaultDistance;
-//        set_distance(DefaultDistance);
-//        near_z -= delta;
-//        far_z -= delta;
-//    }
 
     return ret;
 }

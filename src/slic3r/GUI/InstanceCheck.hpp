@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2023 David Kocík @kocikdav, Roman Beránek @zavorka
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_InstanceCheck_hpp_
 #define slic3r_InstanceCheck_hpp_
 
@@ -43,8 +47,11 @@ class MainFrame;
 #endif // __linux__
 
 using LoadFromOtherInstanceEvent = Event<std::vector<boost::filesystem::path>>;
+using StartDownloadOtherInstanceEvent = Event<std::vector<std::string>>;
+using LoginOtherInstanceEvent = Event<std::string>;
 wxDECLARE_EVENT(EVT_LOAD_MODEL_OTHER_INSTANCE, LoadFromOtherInstanceEvent);
-
+wxDECLARE_EVENT(EVT_START_DOWNLOAD_OTHER_INSTANCE, StartDownloadOtherInstanceEvent);
+wxDECLARE_EVENT(EVT_LOGIN_OTHER_INSTANCE, LoginOtherInstanceEvent);
 using InstanceGoToFrontEvent = SimpleEvent;
 wxDECLARE_EVENT(EVT_INSTANCE_GO_TO_FRONT, InstanceGoToFrontEvent);
 
@@ -74,6 +81,7 @@ public:
 #endif //__APPLE__
 #ifdef _WIN32
 	static void    init_windows_properties(MainFrame* main_frame, size_t instance_hash);
+	void           update_windows_properties(MainFrame* main_frame);
 #endif //WIN32
 private:
 	bool                    m_initialized { false };

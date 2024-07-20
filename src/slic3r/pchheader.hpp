@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2018 - 2021 Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifdef WIN32
 	#ifndef WIN32_LEAN_AND_MEAN
 		#define WIN32_LEAN_AND_MEAN
@@ -73,8 +77,8 @@
 #include <boost/locale.hpp>
 #include <boost/locale/encoding_utf.hpp>
 #include <boost/log/trivial.hpp>
-#include <boost/nowide/cenv.hpp>
 #include <boost/nowide/convert.hpp>
+#include <boost/nowide/cstdlib.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/optional.hpp>

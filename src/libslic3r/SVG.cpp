@@ -1,3 +1,13 @@
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas
+///|/ Copyright (c) Slic3r 2013 - 2016 Alessandro Ranellucci @alranel
+///|/ Copyright (c) 2015 Maksim Derbasov @ntfshard
+///|/
+///|/ ported from lib/Slic3r/SVG.pm:
+///|/ Copyright (c) Prusa Research 2018 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2011 - 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "SVG.hpp"
 #include <iostream>
 
@@ -88,10 +98,8 @@ void SVG::draw(const ExPolygon &expolygon, std::string fill, const float fill_op
     this->fill = fill;
     
     std::string d;
-    Polygons pp = expolygon;
-    for (Polygons::const_iterator p = pp.begin(); p != pp.end(); ++p) {
-        d += this->get_path_d(*p, true) + " ";
-    }
+    for (const Polygon &p : to_polygons(expolygon))
+        d += this->get_path_d(p, true) + " ";
     this->path(d, true, 0, fill_opacity);
 }
 
@@ -181,8 +189,8 @@ void SVG::draw(const ThickLines &thicklines, const std::string &fill, const std:
 
 void SVG::draw(const ThickPolylines &polylines, const std::string &stroke, coordf_t stroke_width)
 {
-    for (ThickPolylines::const_iterator it = polylines.begin(); it != polylines.end(); ++it)
-        this->draw((Polyline)*it, stroke, stroke_width);
+    for (const ThickPolyline &pl : polylines)
+        this->draw(Polyline(pl.points), stroke, stroke_width);
 }
 
 void SVG::draw(const ThickPolylines &thickpolylines, const std::string &fill, const std::string &stroke, coordf_t stroke_width)
@@ -274,26 +282,29 @@ std::string SVG::get_path_d(const ClipperLib::Path &path, double scale, bool clo
     return d.str();
 }
 
-void SVG::draw_text(const Point &pt, const char *text, const char *color)
+void SVG::draw_text(const Point &pt, const char *text, const char *color, const coordf_t font_size)
 {
     fprintf(this->f,
-        "<text x=\"%f\" y=\"%f\" font-family=\"sans-serif\" font-size=\"20px\" fill=\"%s\">%s</text>",
-        to_svg_x(pt(0)-origin(0)),
-        to_svg_y(pt(1)-origin(1)),
+        R"(<text x="%f" y="%f" font-family="sans-serif" font-size="%fpx" fill="%s">%s</text>)",
+        to_svg_x(float(pt.x() - origin.x())),
+        to_svg_y(float(pt.y() - origin.y())),
+        font_size,
         color, text);
 }
 
-void SVG::draw_legend(const Point &pt, const char *text, const char *color)
+void SVG::draw_legend(const Point &pt, const char *text, const char *color, const coordf_t font_size)
 {
     fprintf(this->f,
-        "<circle cx=\"%f\" cy=\"%f\" r=\"10\" fill=\"%s\"/>",
-        to_svg_x(pt(0)-origin(0)),
-        to_svg_y(pt(1)-origin(1)),
+        R"(<circle cx="%f" cy="%f" r="%f" fill="%s"/>)",
+        to_svg_x(float(pt.x() - origin.x())),
+        to_svg_y(float(pt.y() - origin.y())),
+        font_size,
         color);
     fprintf(this->f,
-        "<text x=\"%f\" y=\"%f\" font-family=\"sans-serif\" font-size=\"10px\" fill=\"%s\">%s</text>",
-        to_svg_x(pt(0)-origin(0)) + 20.f,
-        to_svg_y(pt(1)-origin(1)),
+        R"(<text x="%f" y="%f" font-family="sans-serif" font-size="%fpx" fill="%s">%s</text>)",
+        to_svg_x(float(pt.x() - origin.x())) + 20.f,
+        to_svg_y(float(pt.y() - origin.y())),
+        font_size,
         "black", text);
 }
 
@@ -356,7 +367,7 @@ void SVG::export_expolygons(const char *path, const std::vector<std::pair<Slic3r
     for (const auto &exp_with_attr : expolygons_with_attributes)
     	if (exp_with_attr.second.radius_points > 0)
 			for (const ExPolygon &expoly : exp_with_attr.first)
-    			svg.draw((Points)expoly, exp_with_attr.second.color_points, exp_with_attr.second.radius_points);
+    			svg.draw(to_points(expoly), exp_with_attr.second.color_points, exp_with_attr.second.radius_points);
 
     // Export legend.
     // 1st row
@@ -377,4 +388,10 @@ void SVG::export_expolygons(const char *path, const std::vector<std::pair<Slic3r
     svg.Close();
 }
 
+float SVG::to_svg_coord(float x) throw()
+{
+    // return x;
+    return unscale<float>(x) * 10.f;
 }
+
+} // namespace Slic3r

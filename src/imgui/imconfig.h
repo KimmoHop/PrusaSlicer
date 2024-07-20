@@ -140,6 +140,7 @@ namespace ImGui
     const wchar_t CancelButton             = 0x14;
     const wchar_t CancelHoverButton        = 0x15;
 //    const wchar_t VarLayerHeightMarker     = 0x16;
+    const wchar_t RevertButton             = 0x16;
 
     const wchar_t RightArrowButton         = 0x18;
     const wchar_t RightArrowHoverButton    = 0x19;
@@ -149,6 +150,11 @@ namespace ImGui
 //    const wchar_t CustomSupportsMarker     = 0x1D;
 //    const wchar_t CustomSeamMarker         = 0x1E;
 //    const wchar_t MmuSegmentationMarker    = 0x1F;
+    const wchar_t PlugMarker               = 0x1C;
+    const wchar_t DowelMarker              = 0x1D;
+    const wchar_t SnapMarker               = 0x1E;
+    const wchar_t HorizontalHide           = 0xB4;
+    const wchar_t HorizontalShow           = 0xB6;
     // Do not forget use following letters only in wstring
     const wchar_t DocumentationButton      = 0x2600;
     const wchar_t DocumentationHoverButton = 0x2601;
@@ -156,19 +162,52 @@ namespace ImGui
     const wchar_t InfoMarker               = 0x2603;
     const wchar_t SliderFloatEditBtnIcon   = 0x2604;
     const wchar_t SliderFloatEditBtnPressedIcon = 0x2605;
-    const wchar_t LegendTravel             = 0x2606;
-    const wchar_t LegendWipe               = 0x2607;
-    const wchar_t LegendRetract            = 0x2608;
-    const wchar_t LegendDeretract          = 0x2609;
-    const wchar_t LegendSeams              = 0x2610;
-    const wchar_t LegendToolChanges        = 0x2611;
-    const wchar_t LegendColorChanges       = 0x2612;
-    const wchar_t LegendPausePrints        = 0x2613;
-    const wchar_t LegendCustomGCodes       = 0x2614;
-    const wchar_t LegendCOG                = 0x2615;
-    const wchar_t LegendShells             = 0x2616;
-    const wchar_t LegendToolMarker         = 0x2617;
+    const wchar_t ClipboardBtnIcon         = 0x2606;
+    const wchar_t PlayButton               = 0x2618;
+    const wchar_t PlayHoverButton          = 0x2619;
+    const wchar_t PauseButton              = 0x261A;
+    const wchar_t PauseHoverButton         = 0x261B;
+    const wchar_t OpenButton               = 0x261C;
+    const wchar_t OpenHoverButton          = 0x261D;
+    const wchar_t SlaViewOriginal          = 0x261E;
+    const wchar_t SlaViewProcessed         = 0x261F;
 
-//    void MyFunction(const char* name, const MyMatrix44& v);
+    const wchar_t LegendTravel             = 0x2701;
+    const wchar_t LegendWipe               = 0x2702;
+    const wchar_t LegendRetract            = 0x2703;
+    const wchar_t LegendDeretract          = 0x2704;
+    const wchar_t LegendSeams              = 0x2705;
+    const wchar_t LegendToolChanges        = 0x2706;
+    const wchar_t LegendColorChanges       = 0x2707;
+    const wchar_t LegendPausePrints        = 0x2708;
+    const wchar_t LegendCustomGCodes       = 0x2709;
+    const wchar_t LegendCOG                = 0x2710;
+    const wchar_t LegendShells             = 0x2711;
+    const wchar_t LegendToolMarker         = 0x2712;
+    const wchar_t WarningMarkerSmall       = 0x2713;
+    const wchar_t ExpandBtn                = 0x2714;
+    const wchar_t InfoMarkerSmall          = 0x2716;
+    const wchar_t CollapseBtn              = 0x2715;
+
+    // icons for double slider (middle size icons)
+    const wchar_t Lock                     = 0x2801;
+    const wchar_t LockHovered              = 0x2802;
+    const wchar_t Unlock                   = 0x2803;
+    const wchar_t UnlockHovered            = 0x2804;
+    const wchar_t DSRevert                 = 0x2805;
+    const wchar_t DSRevertHovered          = 0x2806;
+    const wchar_t DSSettings               = 0x2807;
+    const wchar_t DSSettingsHovered        = 0x2808;
+    // icons for double slider (small size icons)
+    const wchar_t ErrorTick                = 0x2809;
+    const wchar_t ErrorTickHovered         = 0x280A;
+    const wchar_t PausePrint               = 0x280B;
+    const wchar_t PausePrintHovered        = 0x280C;
+    const wchar_t EditGCode                = 0x280D;
+    const wchar_t EditGCodeHovered         = 0x280E;
+    const wchar_t RemoveTick               = 0x280F;
+    const wchar_t RemoveTickHovered        = 0x2810;
+
+    //    void MyFunction(const char* name, const MyMatrix44& v);
 }
 

@@ -1,3 +1,8 @@
+///|/ Copyright (c) Prusa Research 2018 - 2023 Oleksandra Iushchenko @YuSanka, David Kocík @kocikdav, Lukáš Matěna @lukasmatena, Lukáš Hejl @hejllukas, Vojtěch Král @vojtechkral, Vojtěch Bubník @bubnikv
+///|/ Copyright (c) 2020 Ondřej Nový @onovy
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #include "UpdateDialogs.hpp"
 
 #include <cstring>
@@ -12,6 +17,7 @@
 #include <wx/button.h>
 #include <wx/statbmp.h>
 #include <wx/checkbox.h>
+#include <wx/dirdlg.h>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Utils.hpp"
@@ -93,7 +99,7 @@ bool MsgUpdateSlic3r::disable_version_check() const
 
  wxSize AppUpdateAvailableDialog::AUAD_size;
 // AppUpdater
-AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver& ver_current, const Semver& ver_online)
+AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver& ver_current, const Semver& ver_online, bool from_user)
 	: MsgDialog(nullptr, _(L("App Update available")), wxString::Format(_(L("New version of %s is available.\nDo you wish to download it?")), SLIC3R_APP_NAME))
 {
 	auto* versions = new wxFlexGridSizer(1, 0, VERT_SPACING);
@@ -104,8 +110,10 @@ AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver& ver_current, co
 	content_sizer->Add(versions);
 	content_sizer->AddSpacer(VERT_SPACING);
 
-	cbox = new wxCheckBox(this, wxID_ANY, _(L("Don't notify about new releases any more")));
-	content_sizer->Add(cbox);
+	if(!from_user) {
+		cbox = new wxCheckBox(this, wxID_ANY, _(L("Don't notify about new releases any more")));
+		content_sizer->Add(cbox);
+	}
 	content_sizer->AddSpacer(VERT_SPACING);
 	
 	AUAD_size = content_sizer->GetSize();
@@ -125,15 +133,17 @@ AppUpdateAvailableDialog::~AppUpdateAvailableDialog() {}
 
 bool AppUpdateAvailableDialog::disable_version_check() const
 {
+	if (!cbox)
+		return false;
 	return cbox->GetValue();
 }
 
 // AppUpdateDownloadDialog
 AppUpdateDownloadDialog::AppUpdateDownloadDialog( const Semver& ver_online, boost::filesystem::path& path)
-	: MsgDialog(nullptr, _(L("App Update download")), wxString::Format(_(L("New version of %s is available.")), SLIC3R_APP_NAME))
+	: MsgDialog(nullptr, _L("App Update download"), format_wxstr(_L("New version of %1% is available."), SLIC3R_APP_NAME))
 {
 	auto* versions = new wxFlexGridSizer(2, 0, VERT_SPACING);
-	versions->Add(new wxStaticText(this, wxID_ANY, _(L("New version:"))));
+	versions->Add(new wxStaticText(this, wxID_ANY, _L("New version") + ":"));
 	versions->Add(new wxStaticText(this, wxID_ANY, ver_online.to_string()));
 	content_sizer->Add(versions);
 	content_sizer->AddSpacer(VERT_SPACING);
@@ -143,13 +153,14 @@ AppUpdateDownloadDialog::AppUpdateDownloadDialog( const Semver& ver_online, boos
 #endif
 	content_sizer->AddSpacer(VERT_SPACING);
 	content_sizer->AddSpacer(VERT_SPACING);
-	content_sizer->Add(new wxStaticText(this, wxID_ANY, _(L("Target path:"))));
+	content_sizer->Add(new wxStaticText(this, wxID_ANY, _L("Target directory") + ":"));
 	content_sizer->AddSpacer(VERT_SPACING);
-	txtctrl_path = new wxTextCtrl(this, wxID_ANY, path.wstring());
+	txtctrl_path = new wxTextCtrl(this, wxID_ANY, GUI::format_wxstr(path.parent_path().string()));
+	filename = GUI::format_wxstr(path.filename().string());
 	content_sizer->Add(txtctrl_path, 1, wxEXPAND);
 	content_sizer->AddSpacer(VERT_SPACING);
 	
-	wxButton* btn = new wxButton(this, wxID_ANY, _L("Select path"));
+	wxButton* btn = new wxButton(this, wxID_ANY, _L("Select directory"));
 	content_sizer->Add(btn/*, 1, wxEXPAND*/);
 
 	// button to open file dialog
@@ -161,13 +172,18 @@ AppUpdateDownloadDialog::AppUpdateDownloadDialog( const Semver& ver_online, boos
 			wxString wxext = boost::nowide::widen(extension);
 			wildcard = GUI::format_wxstr("%1% Files (*.%2%)|*.%2%", wxext.Upper(), wxext);
 		}
-		wxFileDialog save_dlg(
+		boost::system::error_code ec;
+		boost::filesystem::path dir = boost::filesystem::absolute(boost::filesystem::path(GUI::format(txtctrl_path->GetValue())), ec);
+		if (ec)
+			dir = GUI::format(txtctrl_path->GetValue());
+		wxDirDialog save_dlg(
 			this
-			, _L("Save as:")
-			, txtctrl_path->GetValue()
-			, boost::nowide::widen(AppUpdater::get_filename_from_url(txtctrl_path->GetValue().ToUTF8().data()))
+			, _L("Select directory") + ":"
+			, GUI::format_wxstr(dir.string())
+			/*
+			, filename //boost::nowide::widen(AppUpdater::get_filename_from_url(txtctrl_path->GetValue().ToUTF8().data()))
 			, wildcard
-			, wxFD_SAVE | wxFD_OVERWRITE_PROMPT
+			, wxFD_SAVE | wxFD_OVERWRITE_PROMPT*/
 		);
 		if (save_dlg.ShowModal() == wxID_OK) {
 			txtctrl_path->SetValue(save_dlg.GetPath());
@@ -181,8 +197,46 @@ AppUpdateDownloadDialog::AppUpdateDownloadDialog( const Semver& ver_online, boos
 	if (auto* btn_ok = get_button(wxID_OK); btn_ok != NULL) {
 		btn_ok->SetLabel(_L("Download"));
 		btn_ok->Bind(wxEVT_BUTTON, ([this, path](wxCommandEvent& e){
-			if (boost::filesystem::exists(boost::filesystem::path(txtctrl_path->GetValue().ToUTF8().data()))) {
-				MessageDialog msgdlg(nullptr, GUI::format_wxstr(_L("File %1% already exists. Do you wish to overwrite it?"), txtctrl_path->GetValue()),_L("Notice"), wxYES_NO);
+			boost::system::error_code ec;
+			std::string input = GUI::into_u8(txtctrl_path->GetValue());
+			boost::filesystem::path dir = boost::filesystem::absolute(boost::filesystem::path(input), ec);
+			if (ec)
+				dir = boost::filesystem::path(input);
+			bool show_change = (dir.string() != input);
+			boost::filesystem::path path = dir / GUI::format(filename);
+			ec.clear();
+			if (dir.string().empty()) {
+				MessageDialog msgdlg(nullptr, _L("Directory path is empty."), _L("Notice"), wxOK);
+				msgdlg.ShowModal();
+				return;
+			}
+			ec.clear();
+			if (!boost::filesystem::exists(dir, ec) || !boost::filesystem::is_directory(dir,ec) || ec) {
+				ec.clear();
+				if (!boost::filesystem::exists(dir.parent_path(), ec) || !boost::filesystem::is_directory(dir.parent_path(), ec) || ec) {
+					MessageDialog msgdlg(nullptr, _L("Directory path is incorrect."), _L("Notice"), wxOK);
+					msgdlg.ShowModal();
+					return;
+				}
+				show_change = false;
+				MessageDialog msgdlg(nullptr, GUI::format_wxstr(_L("Directory %1% doesn't exists. Do you wish to create it?"), dir.string()), _L("Notice"), wxYES_NO);
+				if (msgdlg.ShowModal() != wxID_YES)
+					return;
+				ec.clear();
+				if(!boost::filesystem::create_directory(dir, ec) || ec) {
+					MessageDialog msgdlg(nullptr, _L("Failed to create directory."), _L("Notice"), wxOK);
+					msgdlg.ShowModal();
+					return;
+				}
+			}
+			if (boost::filesystem::exists(path)) {
+				show_change = false;
+				MessageDialog msgdlg(nullptr, GUI::format_wxstr(_L("File %1% already exists. Do you wish to overwrite it?"), path.string()),_L("Notice"), wxYES_NO);
+				if (msgdlg.ShowModal() != wxID_YES)
+					return;
+			}
+			if (show_change) {
+				MessageDialog msgdlg(nullptr, GUI::format_wxstr(_L("Download path is %1%. Do you wish to continue?"), path.string()), _L("Notice"), wxYES_NO);
 				if (msgdlg.ShowModal() != wxID_YES)
 					return;
 			}
@@ -207,7 +261,12 @@ bool AppUpdateDownloadDialog::run_after_download() const
 
 boost::filesystem::path AppUpdateDownloadDialog::get_download_path() const
 {
-	return boost::filesystem::path(txtctrl_path->GetValue().ToUTF8().data());
+	boost::system::error_code ec;
+	std::string input = GUI::into_u8(txtctrl_path->GetValue());
+	boost::filesystem::path dir = boost::filesystem::absolute(boost::filesystem::path(input), ec);
+	if (ec)
+		dir = boost::filesystem::path(input);
+	return dir / GUI::format(filename);
 }
 
 // MsgUpdateConfig
@@ -244,6 +303,13 @@ MsgUpdateConfig::MsgUpdateConfig(const std::vector<Update> &updates, bool force_
 			auto *update_comment = new wxStaticText(this, wxID_ANY, from_u8(update.comment));
 			update_comment->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 			flex->Add(update_comment);
+		}
+
+		if (! update.new_printers.empty()) {
+			flex->Add(new wxStaticText(this, wxID_ANY, _L_PLURAL("New printer", "New printers", update.new_printers.find(',') == std::string::npos ? 1 : 2) + ":"), 0, wxALIGN_RIGHT);
+			auto* update_printer = new wxStaticText(this, wxID_ANY, from_u8(update.new_printers));
+			update_printer->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+			flex->Add(update_printer);
 		}
 
 		versions->Add(flex);
@@ -304,6 +370,13 @@ MsgUpdateForced::MsgUpdateForced(const std::vector<Update>& updates) :
 			auto* update_comment = new wxStaticText(this, wxID_ANY, from_u8(update.comment));
 			update_comment->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 			versions->Add(update_comment);
+		}
+
+		if (!update.new_printers.empty()) {
+			versions->Add(new wxStaticText(this, wxID_ANY, _L_PLURAL("New printer", "New printers", update.new_printers.find(',') == std::string::npos ? 1 : 2)+":")/*, 0, wxALIGN_RIGHT*/);
+			auto* update_printer = new wxStaticText(this, wxID_ANY, from_u8(update.new_printers));
+			update_printer->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
+			versions->Add(update_printer);
 		}
 
 		if (!update.changelog_url.empty() && update.version.prerelease() == nullptr) {
@@ -382,8 +455,7 @@ MsgDataIncompatible::~MsgDataIncompatible() {}
 MsgDataLegacy::MsgDataLegacy() :
 	MsgDialog(nullptr, _(L("Configuration update")), _(L("Configuration update")))
 {
-    auto *text = new wxStaticText(this, wxID_ANY, from_u8((boost::format(
-        _utf8(L(
+    auto *text = new wxStaticText(this, wxID_ANY, format_wxstr( _L(
 			"%s now uses an updated configuration structure.\n\n"
 
 			"So called 'System presets' have been introduced, which hold the built-in default settings for various "
@@ -393,10 +465,8 @@ MsgDataLegacy::MsgDataLegacy() :
 
 			"Please proceed with the %s that follows to set up the new presets "
 			"and to choose whether to enable automatic preset updates."
-        )))
-        % SLIC3R_APP_NAME
-        % _utf8(ConfigWizard::name())).str()
-	));
+        )
+        , SLIC3R_APP_NAME, ConfigWizard::name()));
 	text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 	content_sizer->Add(text);
 	content_sizer->AddSpacer(VERT_SPACING);
@@ -404,7 +474,8 @@ MsgDataLegacy::MsgDataLegacy() :
 	auto *text2 = new wxStaticText(this, wxID_ANY, _(L("For more information please visit our wiki page:")));
 	static const wxString url("https://github.com/prusa3d/PrusaSlicer/wiki/Slic3r-PE-1.40-configuration-update");
 	// The wiki page name is intentionally not localized:
-	auto *link = new wxHyperlinkCtrl(this, wxID_ANY, wxString::Format("%s 1.40 configuration update", SLIC3R_APP_NAME), CONFIG_UPDATE_WIKI_URL);
+	// TRN %s = PrusaSlicer
+	auto *link = new wxHyperlinkCtrl(this, wxID_ANY, format_wxstr(_L("%s 1.40 configuration update"), SLIC3R_APP_NAME), CONFIG_UPDATE_WIKI_URL);
 	content_sizer->Add(text2);
 	content_sizer->Add(link);
 	content_sizer->AddSpacer(VERT_SPACING);
@@ -440,13 +511,8 @@ MsgNoUpdates::~MsgNoUpdates() {}
 MsgNoAppUpdates::MsgNoAppUpdates() :
 	MsgDialog(nullptr, _(L("App update")), _(L("No updates available")), wxICON_ERROR | wxOK)
 {
-
-	auto* text = new wxStaticText(this, wxID_ANY, wxString::Format(
-		_(L(
-			"%s has no version updates available."
-		)),
-		SLIC3R_APP_NAME
-	));
+	//TRN %1% is PrusaSlicer
+	auto* text = new wxStaticText(this, wxID_ANY, format_wxstr(_L("Your %1% is up to date."),SLIC3R_APP_NAME));
 	text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
 	content_sizer->Add(text);
 	content_sizer->AddSpacer(VERT_SPACING);

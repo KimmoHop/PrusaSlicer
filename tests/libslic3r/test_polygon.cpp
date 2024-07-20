@@ -196,17 +196,35 @@ SCENARIO("Simplify polygon", "[Polygon]")
             }
         }
     }
-    GIVEN("hole in square") {
-        // CW oriented
-        auto hole_in_square = Polygon{ {140, 140}, {140, 160}, {160, 160}, {160, 140} };
-        WHEN("simplified") {
-            Polygons simplified = hole_in_square.simplify(2.);
-            THEN("hole simplification returns one polygon") {
-                REQUIRE(simplified.size() == 1);
-            }
-            THEN("hole simplification turns cw polygon into ccw polygon") {
-                REQUIRE(simplified.front().is_counter_clockwise());
-            }
-        }
+}
+
+#include "libslic3r/ExPolygon.hpp"
+#include "libslic3r/ExPolygonsIndex.hpp"
+TEST_CASE("Indexing expolygons", "[ExPolygon]")
+{
+    ExPolygons expolys{
+        ExPolygon{Polygon{{0, 0}, {10, 0}, {0, 5}}, Polygon{{4, 3}, {6, 3}, {5, 2}}},
+        ExPolygon{Polygon{{100, 0}, {110, 0}, {100, 5}}, Polygon{{104, 3}, {106, 3}, {105, 2}}}    
+    };
+    Points points = to_points(expolys);
+    Lines lines = to_lines(expolys);
+    Linesf linesf = to_linesf(expolys);
+    ExPolygonsIndices ids(expolys);
+    REQUIRE(points.size() == lines.size());
+    REQUIRE(points.size() == linesf.size());
+    REQUIRE(points.size() == ids.get_count());
+    for (size_t i = 0; i < ids.get_count(); i++) { 
+        ExPolygonsIndex id = ids.cvt(i);
+        const ExPolygon &expoly = expolys[id.expolygons_index];
+        const Polygon &poly     = id.is_contour() ? expoly.contour : expoly.holes[id.hole_index()];
+        const Points &pts       = poly.points;
+        const Point &p          = pts[id.point_index];
+        CHECK(points[i] == p);
+        CHECK(lines[i].a == p);
+        CHECK(linesf[i].a.cast<int>() == p);
+        CHECK(ids.cvt(id) == i);
+        const Point &p_b = ids.is_last_point(id) ? pts.front() : pts[id.point_index + 1];
+        CHECK(lines[i].b == p_b);
+        CHECK(linesf[i].b.cast<int>() == p_b);
     }
 }

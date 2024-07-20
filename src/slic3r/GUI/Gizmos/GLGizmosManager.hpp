@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2019 - 2022 Enrico Turri @enricoturri1966, Lukáš Matěna @lukasmatena, Oleksandra Iushchenko @YuSanka, Filip Sykala @Jony01, David Kocík @kocikdav, Lukáš Hejl @hejllukas, Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GUI_GLGizmosManager_hpp_
 #define slic3r_GUI_GLGizmosManager_hpp_
 
@@ -34,7 +38,6 @@ public:
     Rect() = default;
     Rect(float left, float top, float right, float bottom) : m_left(left) , m_top(top) , m_right(right) , m_bottom(bottom) {}
 
-#if ENABLE_LEGACY_OPENGL_REMOVAL
     bool operator == (const Rect& other) const {
         if (std::abs(m_left - other.m_left) > EPSILON) return false;
         if (std::abs(m_top - other.m_top) > EPSILON) return false;
@@ -43,7 +46,6 @@ public:
         return true;
     }
     bool operator != (const Rect& other) const { return !operator==(other); }
-#endif // ENABLE_LEGACY_OPENGL_REMOVAL
 
     float get_left() const { return m_left; }
     void set_left(float left) { m_left = left; }
@@ -79,6 +81,9 @@ public:
         FdmSupports,
         Seam,
         MmuSegmentation,
+        Measure,
+        Emboss,
+        Svg,
         Simplify,
         Undefined
     };
@@ -89,14 +94,16 @@ private:
         float scale{ 1.0f };
         float icons_size{ Default_Icons_Size };
         float border{ 5.0f };
-        float gap_y{ 5.0f };
+        float gap_x{ 15.0f };
+        float gap_y{ 15.0f };
 
         float stride_y() const { return icons_size + gap_y;}
 
-        float scaled_icons_size() const { return scale * icons_size; }
-        float scaled_border() const { return scale * border; }
-        float scaled_gap_y() const { return scale * gap_y; }
-        float scaled_stride_y() const { return scale * stride_y(); }
+        float scaled_icons_size()   const { return int(scale * icons_size); }
+        float scaled_border()       const { return int(scale * border); }
+        float scaled_gap_x()        const { return int(scale * gap_x); }
+        float scaled_gap_y()        const { return int(scale * gap_y); }
+        float scaled_stride_y()     const { return scaled_icons_size() + scaled_gap_y(); }
     };
 
     GLCanvas3D& m_parent;
@@ -105,11 +112,7 @@ private:
     GLTexture m_icons_texture;
     bool m_icons_texture_dirty;
     BackgroundTexture m_background_texture;
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     GLTexture m_arrow_texture;
-#else
-    BackgroundTexture m_arrow_texture;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
     Layout m_layout;
     EType m_current;
     EType m_hover;
@@ -137,11 +140,7 @@ public:
 
     bool init();
 
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     bool init_arrow(const std::string& filename);
-#else
-    bool init_arrow(const BackgroundTexture::Metadata& arrow_texture);
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
     template<class Archive>
     void load(Archive& ar)
@@ -199,6 +198,7 @@ public:
 
     EType get_current_type() const { return m_current; }
     GLGizmoBase* get_current() const;
+    GLGizmoBase* get_gizmo(GLGizmosManager::EType type) const;
     EType get_gizmo_from_name(const std::string& gizmo_name) const;
 
     bool is_running() const;
@@ -213,7 +213,6 @@ public:
     bool is_hiding_instances() const;
 
     void render_current_gizmo() const;
-    void render_current_gizmo_for_picking_pass() const;
     void render_painter_gizmo();
 
     void render_overlay();
@@ -234,6 +233,8 @@ public:
     // To end highlight set gizmo = undefined
     void set_highlight(EType gizmo, bool highlight_shown) { m_highlight = std::pair<EType, bool>(gizmo, highlight_shown); }
     bool get_highlight_state() const { return m_highlight.second; }
+    float get_scaled_total_height() const;
+    float get_scaled_total_width() const;
 
 private:
     bool gizmo_event(SLAGizmoEventType action,
@@ -242,17 +243,9 @@ private:
                      bool              alt_down       = false,
                      bool              control_down   = false);
     
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     void render_background(float left, float top, float right, float bottom, float border_w, float border_h) const;
-#else
-    void render_background(float left, float top, float right, float bottom, float border) const;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
 
     void do_render_overlay() const;
-
-    float get_scaled_total_height() const;
-    float get_scaled_total_width() const;
-
     bool generate_icons_texture();
 
     void update_hover_state(const EType &type);

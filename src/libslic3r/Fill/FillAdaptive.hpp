@@ -1,3 +1,7 @@
+///|/ Copyright (c) Prusa Research 2020 - 2021 Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Lukáš Hejl @hejllukas, Tomáš Mészáros @tamasmeszaros
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 // Adaptive cubic infill was inspired by the work of @mboerwinkle
 // as implemented for Cura.
 // https://github.com/Ultimaker/CuraEngine/issues/381
@@ -71,6 +75,7 @@ protected:
     // may not be optimal as the internal infill lines may get extruded before the long infill
     // lines to which the short infill lines are supposed to anchor.
 	bool no_sort() const override { return false; }
+    bool is_self_crossing() override { return true; }
 };
 
 } // namespace FillAdaptive

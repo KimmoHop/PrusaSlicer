@@ -1,3 +1,10 @@
+///|/ Copyright (c) Prusa Research 2017 - 2022 Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/
+///|/ ported from lib/Slic3r/GUI/GLShader.pm:
+///|/ Copyright (c) Prusa Research 2016 - 2017 Vojtěch Bubník @bubnikv
+///|/
+///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/
 #ifndef slic3r_GLShader_hpp_
 #define slic3r_GLShader_hpp_
 
@@ -62,13 +69,11 @@ public:
     void set_uniform(const char* name, const Transform3f& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const Transform3d& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const Matrix3f& value) const { set_uniform(get_uniform_location(name), value); }
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     void set_uniform(const char* name, const Matrix3d& value) const { set_uniform(get_uniform_location(name), value); }
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-#if ENABLE_GL_IMGUI_SHADERS
     void set_uniform(const char* name, const Matrix4f& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const Matrix4d& value) const { set_uniform(get_uniform_location(name), value); }
-#endif // ENABLE_GL_IMGUI_SHADERS
+    void set_uniform(const char* name, const Vec2f& value) const { set_uniform(get_uniform_location(name), value); }
+    void set_uniform(const char* name, const Vec2d& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const Vec3f& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const Vec3d& value) const { set_uniform(get_uniform_location(name), value); }
     void set_uniform(const char* name, const ColorRGB& value) const { set_uniform(get_uniform_location(name), value); }
@@ -89,13 +94,11 @@ public:
     void set_uniform(int id, const Transform3f& value) const;
     void set_uniform(int id, const Transform3d& value) const;
     void set_uniform(int id, const Matrix3f& value) const;
-#if ENABLE_GL_SHADERS_ATTRIBUTES
     void set_uniform(int id, const Matrix3d& value) const;
-#endif // ENABLE_GL_SHADERS_ATTRIBUTES
-#if ENABLE_GL_IMGUI_SHADERS
     void set_uniform(int id, const Matrix4f& value) const;
     void set_uniform(int id, const Matrix4d& value) const;
-#endif // ENABLE_GL_IMGUI_SHADERS
+    void set_uniform(int id, const Vec2f& value) const;
+    void set_uniform(int id, const Vec2d& value) const;
     void set_uniform(int id, const Vec3f& value) const;
     void set_uniform(int id, const Vec3d& value) const;
     void set_uniform(int id, const ColorRGB& value) const;
